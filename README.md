@@ -7,7 +7,7 @@ NVFP4-quantized [Gemma 4 26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A
 | Resource | Link |
 |---|---|
 | **Model Weights + Full Documentation** | [AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4 on HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
-| **Pre-built vLLM Container (DGX Spark)** | [ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4](https://github.com/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4) |
+| **Pre-built vLLM Container (DGX Spark)** | [ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4](https://github.com/users/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4) |
 
 ## Quick Start
 
@@ -54,7 +54,7 @@ docker run --gpus all --ipc host -p 8000:8000 \
 
 ## Performance (DGX Spark GB10)
 
-Benchmarked with [`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest`](https://github.com/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). **Zero failures** across all concurrency levels.
+Benchmarked with [`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest`](https://github.com/users/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). **Zero failures** across all concurrency levels.
 
 | Concurrent | Aggregate tok/s | Per-Request tok/s | Avg Latency (200 tok) |
 |---:|---:|---:|---:|
@@ -226,7 +226,7 @@ Full technical details: [HuggingFace Model Card](https://huggingface.co/AEON-7/G
 
 ## Disclaimer, Liability Waiver, and Assumption of Risk
 
-**THIS IS AN UNCENSORED MODEL.** By downloading, accessing, or using this model, the associated container image ([`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4`](https://github.com/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4)), or any derivative works thereof, you expressly acknowledge and agree to the following:
+**THIS IS AN UNCENSORED MODEL.** By downloading, accessing, or using this model, the associated container image ([`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4`](https://github.com/users/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4)), or any derivative works thereof, you expressly acknowledge and agree to the following:
 
 ### Assumption of Risk
 
