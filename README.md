@@ -35,7 +35,8 @@ docker run --gpus all --ipc host -p 8000:8000 \
     --load-format safetensors \
     --enable-prefix-caching \
     --enable-auto-tool-choice \
-    --tool-call-parser gemma4
+    --tool-call-parser gemma4 \
+    --reasoning-parser gemma4
 ```
 
 ## Model Specs
