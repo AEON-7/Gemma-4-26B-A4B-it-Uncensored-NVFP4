@@ -1,7 +1,3 @@
-# Gemma 4 26B-A4B-it Uncensored NVFP4
-
-NVFP4-quantized [Gemma 4 26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it) (abliterated/uncensored) optimized for NVIDIA DGX Spark and Blackwell GPUs. Quantized from [TrevorJS/gemma-4-26B-A4B-it-uncensored](https://huggingface.co/TrevorJS/gemma-4-26B-A4B-it-uncensored) using [llmcompressor](https://github.com/vllm-project/llmcompressor).
-
 ## Quick Links
 
 | Resource | Link |
@@ -261,3 +257,7 @@ The authors, contributors, and distributors of this model and container image ("
 ## License
 
 This model inherits the [Gemma license](https://ai.google.dev/gemma/terms) from Google.
+
+# Gemma 4 26B-A4B-it Uncensored NVFP4
+
+NVFP4-quantized [Gemma 4 26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it) (abliterated/uncensored) optimized for NVIDIA DGX Spark and Blackwell GPUs. Quantized from [TrevorJS/gemma-4-26B-A4B-it-uncensored](https://huggingface.co/TrevorJS/gemma-4-26B-A4B-it-uncensored) using [llmcompressor](https://github.com/vllm-project/llmcompressor).
