@@ -221,6 +221,17 @@ This model required several post-quantization fixes to work correctly with vLLM.
 
 Full technical details: [HuggingFace Model Card](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4)
 
+## Related Models
+
+| Model | Type | Size | tok/s (DGX Spark) | Links |
+|---|---|---|---|---|
+| **This model (Gemma 4 26B MoE)** | MoE NVFP4 | 15.3 GB | ~43-50 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
+| **Gemma 4 31B DECKARD AWQ_FULL** | Dense NVFP4 | 20.5 GB | ~12-14 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4) \| [GitHub](https://github.com/AEON-7/Gemma-4-31B-DECKARD-HERETIC-Uncensored-NVFP4) |
+| **Gemma 4 31B DECKARD SVDQuant** | Dense NVFP4 | 20.9 GB | ~10-13 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4-SVDQuant) |
+| **Qwen3.5-27B Uncensored** | Dense NVFP4 | ~15 GB | ~15-18 | [HuggingFace](https://huggingface.co/AEON-7/Qwen3.5-27B-Uncensored-NVFP4) |
+
+> **MoE vs Dense**: The MoE model is 3-4x faster than dense models because it only reads ~4B parameters per token (top-8 of 128 experts) vs 27-31B for dense models. Choose MoE for speed and concurrency, dense for maximum quality.
+
 ## Disclaimer, Liability Waiver, and Assumption of Risk
 
 **THIS IS AN UNCENSORED MODEL.** By downloading, accessing, or using this model, the associated container image ([`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4`](https://github.com/users/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4)), or any derivative works thereof, you expressly acknowledge and agree to the following:
@@ -261,3 +272,4 @@ This model inherits the [Gemma license](https://ai.google.dev/gemma/terms) from 
 # Gemma 4 26B-A4B-it Uncensored NVFP4
 
 NVFP4-quantized [Gemma 4 26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it) (abliterated/uncensored) optimized for NVIDIA DGX Spark and Blackwell GPUs. Quantized from [TrevorJS/gemma-4-26B-A4B-it-uncensored](https://huggingface.co/TrevorJS/gemma-4-26B-A4B-it-uncensored) using [llmcompressor](https://github.com/vllm-project/llmcompressor).
+
