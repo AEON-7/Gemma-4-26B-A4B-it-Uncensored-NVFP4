@@ -5,15 +5,14 @@
 | Resource | Link |
 |---|---|
 | **Model Weights + Full Documentation** | [AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4 on HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
-| **Baseline vLLM Container (DGX Spark)** | [`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4`](https://github.com/users/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4) |
-| **DFlash vLLM Container (DGX Spark)** | [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) |
+| **DFlash vLLM Container (DGX Spark)** | [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) |
 | **DFlash Drafter** | [z-lab/gemma-4-26B-A4B-it-DFlash](https://huggingface.co/z-lab/gemma-4-26B-A4B-it-DFlash) |
 
 ## Quick Start
 
 ```bash
-# 1. Pull the DGX Spark / GB10 DFlash image.
-docker pull ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest
+# 1. Pull the DGX Spark / GB10 DFlash v2 image.
+docker pull ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2
 
 # 2. Download the target model and DFlash drafter.
 mkdir -p models
@@ -30,30 +29,26 @@ docker run --gpus all --ipc host --network host \
   -e VLLM_USE_FLASHINFER_SAMPLER=1 \
   -v "$PWD/models/gemma4:/models/gemma4:ro" \
   -v "$PWD/models/gemma4-dflash:/models/gemma4-dflash:ro" \
-  ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest \
+  ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2 \
   vllm serve /models/gemma4 \
     --served-model-name gemma4-aeon-uncensored gemma4-fast gemma4-deep \
     --host 0.0.0.0 \
     --port 8000 \
     --tensor-parallel-size 1 \
     --dtype auto \
-    --quantization compressed-tensors \
-    --load-format safetensors \
     --max-model-len 32768 \
     --max-num-seqs 256 \
     --max-num-batched-tokens 32768 \
-    --gpu-memory-utilization 0.84 \
-    --kv-cache-dtype fp8 \
+    --gpu-memory-utilization 0.76 \
     --enable-chunked-prefill \
     --enable-prefix-caching \
     --trust-remote-code \
     --enable-auto-tool-choice \
     --tool-call-parser gemma4 \
-    --attention-backend triton_attn \
     --speculative-config '{"method":"dflash","model":"/models/gemma4-dflash","num_speculative_tokens":15,"attention_backend":"flash_attn"}'
 ```
 
-This profile is tuned for high-concurrency agent traffic on DGX Spark. For longer per-request contexts, raise `--max-model-len` and reduce `--max-num-seqs` to match the KV cache budget.
+This profile is tuned for interactive and low-to-medium concurrency agent traffic on DGX Spark. `:latest` tracks the same v2 image. For longer per-request contexts, raise `--max-model-len` and reduce `--max-num-seqs` to match the KV cache budget.
 
 ## Model Specs
 
@@ -71,46 +66,31 @@ This profile is tuned for high-concurrency agent traffic on DGX Spark. For longe
 
 ## Performance (DGX Spark GB10)
 
-Benchmarked with [`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest`](https://github.com/users/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). **Zero failures** across all concurrency levels.
+Benchmarked with [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). The server used the official vLLM 0.20.1 base with the AEON DFlash overlay baked into a single container, native FlashInfer CUTLASS NVFP4 GEMM, VLLM CUTLASS MoE, CUDA graphs, `--gpu-memory-utilization 0.76`, `--max-num-batched-tokens 32768`, `--max-num-seqs 256`, and DFlash `num_speculative_tokens=15`.
 
-| Concurrent | Aggregate tok/s | Per-Request tok/s | Avg Latency (200 tok) |
-|---:|---:|---:|---:|
-| 1 | 50 | 50 | 4.0s |
-| 2 | 89 | 45 | 4.5s |
-| 4 | 144 | 36 | 5.6s |
-| 8 | 159 | 20 | 10.1s |
-| 16 | 368 | 23 | 8.7s |
-| 32 | 599 | 19 | 10.7s |
-| 64 | 951 | 15 | 13.5s |
-| 128 | 1,430 | 11 | 17.9s |
+Interactive sweep: these are the most relevant numbers for chat, coding, tool use, and small agent teams.
 
-## DFlash Performance (DGX Spark GB10)
-
-Benchmarked with [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). The server used native FlashInfer CUTLASS NVFP4 GEMM, VLLM CUTLASS MoE, FP8 KV cache, CUDA graphs, `--max-num-batched-tokens 32768`, `--max-num-seqs 256`, and DFlash `num_speculative_tokens=15`.
-
-Single-stream latency was measured in a dedicated c=1 pass with three natural-prompt samples per category. This is the number that best reflects interactive chat feel.
-
-| Category | Median c=1 tok/s | Median TTFT | Median TPOT |
-|---|---:|---:|---:|
-| Coding | 93.03 | 78.6 ms | 10.39 ms |
-| Math | 70.87 | 99.1 ms | 13.66 ms |
-| Reasoning | 61.03 | 115.7 ms | 15.99 ms |
-| Prose | 41.19 | 87.4 ms | 23.89 ms |
-| Natural language | 52.12 | 81.2 ms | 18.81 ms |
-| Extraction / JSON | 164.97 | 72.5 ms | 5.39 ms |
+| Category | c=1 tok/s | c=1 TTFT p50 | c=1 TPOT p50 | c=4 agg tok/s | c=8 agg tok/s | c=16 agg tok/s |
+|---|---:|---:|---:|---:|---:|---:|
+| Coding | 81.60 | 94 ms | 11.83 ms | 223.92 | 481.38 | 740.22 |
+| Math | 56.19 | 880 ms | 13.28 ms | 248.34 | 421.30 | 614.34 |
+| Reasoning | 63.09 | 251 ms | 14.62 ms | 215.63 | 352.00 | 533.43 |
+| Prose | 39.81 | 258 ms | 23.83 ms | 152.79 | 247.07 | 405.97 |
+| Natural language | 44.52 | 238 ms | 21.10 ms | 183.90 | 321.85 | 491.19 |
+| Extraction / JSON | 65.92 | 811 ms | 5.46 ms | 411.85 | 743.66 | 1,299.40 |
 
 High-concurrency sweep: 6 natural prompt categories x 8 concurrency levels (`1, 4, 8, 16, 32, 64, 128, 256`) = 48 benchmark points, **0 request errors**.
 
 | Category | c=1 tok/s | Peak aggregate tok/s | c=256 aggregate tok/s | c=256 TTFT p50 |
 |---|---:|---:|---:|---:|
-| Coding | 78.77 | 1,236.09 @ c=128 | 1,202.46 | 3,130 ms |
-| Math | 70.77 | 972.26 @ c=128 | 970.50 | 1,487 ms |
-| Reasoning | 51.54 | 769.37 @ c=128 | 766.02 | 967 ms |
-| Prose | 39.33 | 654.05 @ c=64 | 590.11 | 1,041 ms |
-| Natural language | 44.63 | 728.01 @ c=128 | 727.75 | 1,240 ms |
-| Extraction / JSON | 159.52 | 2,339.82 @ c=128 | 2,333.45 | 907 ms |
+| Coding | 81.60 | 1,142.76 @ c=64 | 1,076.05 | 3,965 ms |
+| Math | 56.19 | 992.82 @ c=64 | 947.76 | 1,651 ms |
+| Reasoning | 63.09 | 874.56 @ c=256 | 874.56 | 782 ms |
+| Prose | 39.81 | 591.29 @ c=64 | 541.10 | 1,232 ms |
+| Natural language | 44.52 | 653.83 @ c=128 | 647.37 | 1,144 ms |
+| Extraction / JSON | 65.92 | 2,069.83 @ c=128 | 2,066.46 | 917 ms |
 
-DFlash is strongest for single-stream decode and short agent/tool-call bursts. At very high concurrency, the drafter adds scheduling pressure and per-request latency rises; for bulk background queues, compare against the stock vLLM baseline below.
+DFlash v2 is strongest for interactive decode and short agent/tool-call bursts. At very high concurrency, the drafter adds scheduling pressure and per-request latency rises; c=256 is best read as a saturation probe, not the recommended production target. For raw many-request aggregate throughput without speculation, compare against the stock vLLM baseline below.
 
 ## Stock Community vLLM Baseline (No DFlash)
 
@@ -133,7 +113,7 @@ Use the stock community path when raw many-request aggregate throughput matters 
 
 ## Why This Is Hard: Gemma 4 on DGX Spark
 
-Running Gemma 4 NVFP4 on a DGX Spark used to require a source-built stack. As of the 2026-05-06 community `vllm/vllm-openai:latest` image, upstream vLLM can boot this model on GB10, but the optimized DFlash path still needs a purpose-built image and a carefully pinned launch recipe. Every layer of the stack, from the silicon to the serving framework to the model weights themselves, has had compatibility gaps worth understanding.
+Running Gemma 4 NVFP4 on a DGX Spark used to require a source-built stack. As of the 2026-05-06 community `vllm/vllm-openai:latest` image, upstream vLLM can boot this model on GB10, and AEON's v2 image packages the optimized DFlash path as a single pull-and-run container. Every layer of the stack, from the silicon to the serving framework to the model weights themselves, has had compatibility gaps worth understanding.
 
 ### The DGX Spark Problem
 
@@ -220,18 +200,19 @@ The fix is adding tokens 98, 100, and 101 to the `eos_token_id` list in `generat
 
 ### What's In The Container (The Special Sauce)
 
-The `ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash` container is a from-source build of the entire inference stack, targeting this model on GB10 specifically:
+The `ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2` container starts from the official community vLLM 0.20.1 runtime and bakes in the AEON Gemma 4 DFlash overlay. Users pull one image; no local patching or source build is required.
 
 | Component | What It Is | Why It Matters |
 |---|---|---|
-| **vLLM 0.19.2rc1.dev130 + PR #41703** | Inference engine, compiled with `TORCH_CUDA_ARCH_LIST=12.1a` | Adds the Gemma 4 DFlash compatibility path while keeping native SM 12.1 kernels. |
-| **FlashInfer 0.6.9** | FP4 GEMM and sampler support, compiled with `FLASHINFER_CUDA_ARCH_LIST=12.1a` | Provides `FlashInferCutlassNvFp4LinearKernel` for native Blackwell FP4 GEMM. |
-| **PyTorch 2.11.0 + CUDA 13.2 runtime** | Framework + CUDA runtime | CUDA 13.x is required for full SM 12.1 support on GB10. |
-| **transformers 5.8.0** | Model config/tokenizer loading | Gemma 4 support requires transformers v5+. |
+| **Official vLLM 0.20.1 base** | Upstream `vllm/vllm-openai` runtime | Keeps the strong low-concurrency behavior of the community image while adding the DFlash path. |
+| **AEON DFlash overlay** | Python patchset baked into site-packages at build time | Adds `method="dflash"` support, Gemma 4 drafter wiring, and backend isolation so users do not apply patches manually. |
+| **PyTorch 2.11.0 + CUDA 13 runtime** | Framework + CUDA runtime from the official image | Provides current SM 12.1 support for GB10. |
+| **transformers 5.7.0+** | Model config/tokenizer loading | Gemma 4 support requires transformers v5+. |
 | **DFlash drafter** | `z-lab/gemma-4-26B-A4B-it-DFlash`, k=15 | Speculative decoding for the Gemma 4 26B A4B target model. |
 | **Native FP4 CUTLASS kernels** | FlashInfer CUTLASS for linear layers, VLLM CUTLASS for MoE | Do not force Marlin on this image; the native FP4 path is faster on GB10. |
 | **TRITON_ATTN backend** | Attention computation | Handles Gemma 4's heterogeneous head dimensions (256/512) without numerical divergence. Other backends assume uniform head_dim. |
-| **torch.compile + CUDA graphs** | Graph capture and kernel fusion | Captures the full decode graph as a CUDA graph for each batch size 1-256. Eliminates Python overhead and CPU-GPU synchronization on the decode hot path. ~2.5s one-time compilation cost at startup. |
+| **FlashAttention drafter backend** | DFlash draft attention | Keeps non-causal DFlash attention on a backend that supports it while the Gemma target model stays on Triton attention. |
+| **torch.compile + CUDA graphs** | Graph capture and kernel fusion | Captures decode graphs for the configured batch sizes, reducing Python overhead on the decode hot path. |
 
 ### Why MoE Makes This Possible
 
@@ -251,38 +232,34 @@ For this **MoE model** (top-8 of 128 experts, ~2.8 GB active per token):
 273 GB/s / 2.8 GB = ~97 tok/s (theoretical max)
 ```
 
-We achieve **50 tok/s in practice** (51% efficiency) — the gap comes from KV cache reads, attention computation, router overhead, and memory access patterns. But the key insight is that MoE turns a bandwidth-impossible problem (dense 27B) into a bandwidth-comfortable one, with enough headroom to scale to 128 concurrent requests at 1,430 aggregate tok/s.
+We achieve **~40-82 tok/s single-stream** depending on prompt shape, with enough headroom to pass 1,000 aggregate tok/s on coding and more than 2,000 aggregate tok/s on extraction/JSON workloads. The gap from the theoretical limit comes from KV cache reads, attention computation, router overhead, drafter verification, and memory access patterns. But the key insight is that MoE turns a bandwidth-impossible problem (dense 27B) into a bandwidth-comfortable one.
 
 | Model Type | Params Read/Token | Max tok/s on GB10 | Practical tok/s |
 |---|---|---|---|
 | Dense 27B BF16 | ~54 GB | 5 | Not viable |
 | Dense 27B NVFP4 | ~13.5 GB | 20 | ~15 |
-| **MoE 26B top-8/128 NVFP4** | **~2.8 GB** | **97** | **50** |
+| **MoE 26B top-8/128 NVFP4 + DFlash** | **~2.8 GB + drafter** | **97** | **40-82 c=1, 1K+ aggregate** |
 
 This is why architecture choice matters more than raw parameter count on bandwidth-limited hardware. A 26B MoE model at NVFP4 is faster than a dense 7B at BF16 on the same hardware.
 
 ## Container Image Details
 
-### Baseline Image
+### DFlash v2 Image
 
-**`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest`**
+**`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2`**
 
-This is the original DGX Spark baseline image used for the baseline performance table above. It remains available for non-DFlash serving and compatibility comparisons.
-
-### DFlash Image
-
-**`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest`**
+`latest` currently points to the same v2 image.
 
 | Component | Version |
 |---|---|
-| vLLM | 0.19.2rc1.dev130+gabf82193b.d20260506, built from vLLM PR #41703 |
+| vLLM | 0.20.1 official base + AEON DFlash overlay |
 | PyTorch | 2.11.0+cu130 |
-| transformers | 5.8.0 |
-| FlashInfer | 0.6.9 |
+| transformers | 5.7.0+ |
+| AEON overlay revision | `06e292d0ce7e0ddc4f84bd200c3bdf55c7875eb7` |
 | DFlash drafter | z-lab/gemma-4-26B-A4B-it-DFlash |
 | Target GPU | NVIDIA GB10 (DGX Spark, SM 12.1) |
 
-Built from [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) with transformers v5 enabled and vLLM PR #41703 for Gemma 4 DFlash support. For other GPU architectures, see the [build-from-source instructions](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4#building-from-source) on the HuggingFace model page.
+The v2 image is the recommended default for real interactive use cases. Previous tags such as `v0.1.0` and `pr41703-20260506` remain available for historical comparison and high-concurrency experiments.
 
 ### Stock Community Baseline Image
 
@@ -313,7 +290,7 @@ Full technical details: [HuggingFace Model Card](https://huggingface.co/AEON-7/G
 
 | Model | Type | Size | tok/s (DGX Spark) | Links |
 |---|---|---|---|---|
-| **This model (Gemma 4 26B MoE + DFlash)** | MoE NVFP4 | 15.3 GB | 93.03 c=1 coding / 1,236 aggregate coding / 2,340 aggregate extraction | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
+| **This model (Gemma 4 26B MoE + DFlash v2)** | MoE NVFP4 | 15.3 GB | 81.6 c=1 coding / 1,143 aggregate coding / 2,070 aggregate extraction | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
 | **Gemma 4 31B DECKARD AWQ_FULL** | Dense NVFP4 | 20.5 GB | ~12-14 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4) \| [GitHub](https://github.com/AEON-7/Gemma-4-31B-DECKARD-HERETIC-Uncensored-NVFP4) |
 | **Gemma 4 31B DECKARD SVDQuant** | Dense NVFP4 | 20.9 GB | ~10-13 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4-SVDQuant) |
 | **Qwen3.5-27B Uncensored** | Dense NVFP4 | ~15 GB | ~15-18 | [HuggingFace](https://huggingface.co/AEON-7/Qwen3.5-27B-Uncensored-NVFP4) |
