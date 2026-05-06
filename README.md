@@ -88,43 +88,71 @@ Benchmarked with [`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest`](https://githu
 
 Benchmarked with [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). ASR/TTS containers were stopped during this run. The server used native FlashInfer CUTLASS NVFP4 GEMM, VLLM CUTLASS MoE, FP8 KV cache, CUDA graphs, `--max-num-batched-tokens 32768`, `--max-num-seqs 256`, and DFlash `num_speculative_tokens=15`.
 
-Full sweep: 6 natural prompt categories x 8 concurrency levels (`1, 4, 8, 16, 32, 64, 128, 256`) = 48 benchmark points, **0 request errors**.
+Single-stream latency was measured in a dedicated c=1 pass with three natural-prompt samples per category. This is the number that best reflects interactive chat feel.
+
+| Category | Median c=1 tok/s | Median TTFT | Median TPOT |
+|---|---:|---:|---:|
+| Coding | 93.03 | 78.6 ms | 10.39 ms |
+| Math | 70.87 | 99.1 ms | 13.66 ms |
+| Reasoning | 61.03 | 115.7 ms | 15.99 ms |
+| Prose | 41.19 | 87.4 ms | 23.89 ms |
+| Natural language | 52.12 | 81.2 ms | 18.81 ms |
+| Extraction / JSON | 164.97 | 72.5 ms | 5.39 ms |
+
+High-concurrency sweep: 6 natural prompt categories x 8 concurrency levels (`1, 4, 8, 16, 32, 64, 128, 256`) = 48 benchmark points, **0 request errors**.
 
 | Category | c=1 tok/s | Peak aggregate tok/s | c=256 aggregate tok/s | c=256 TTFT p50 |
 |---|---:|---:|---:|---:|
-| Coding | 79.69 | 1,230.12 @ c=128 | 1,004.31 | 3,127 ms |
-| Math | 70.88 | 1,064.15 @ c=128 | 1,038.93 | 1,834 ms |
-| Reasoning | 61.87 | 896.77 @ c=64 | 770.49 | 734 ms |
-| Prose | 37.48 | 628.40 @ c=64 | 581.30 | 1,205 ms |
-| Natural language | 39.31 | 723.84 @ c=256 | 723.84 | 1,177 ms |
-| Extraction / JSON | 156.19 | 2,352.04 @ c=256 | 2,352.04 | 896 ms |
+| Coding | 78.77 | 1,236.09 @ c=128 | 1,202.46 | 3,130 ms |
+| Math | 70.77 | 972.26 @ c=128 | 970.50 | 1,487 ms |
+| Reasoning | 51.54 | 769.37 @ c=128 | 766.02 | 967 ms |
+| Prose | 39.33 | 654.05 @ c=64 | 590.11 | 1,041 ms |
+| Natural language | 44.63 | 728.01 @ c=128 | 727.75 | 1,240 ms |
+| Extraction / JSON | 159.52 | 2,339.82 @ c=128 | 2,333.45 | 907 ms |
 
-At very high concurrency, aggregate throughput remains strong but per-request decode latency rises. For interactive chat, the practical sweet spot is usually c=16-c=64. For background extraction and many short agent calls, c=128-c=256 is viable.
+DFlash is strongest for single-stream decode and short agent/tool-call bursts. At very high concurrency, the drafter adds scheduling pressure and per-request latency rises; for bulk background queues, compare against the stock vLLM baseline below.
+
+## Stock Community vLLM Baseline (No DFlash)
+
+Benchmarked with the official community image `vllm/vllm-openai:latest` pulled on 2026-05-06 (`vLLM 0.20.1`, PyTorch `2.11.0+cu130`, transformers `5.7.0`, image digest `sha256:9eff9734a30b6713a8566217d36f8277630fd2d31cec7f0a0292835901a23aa4`). This run used the same model weights, 32K context, `--max-num-batched-tokens 32768`, and `--max-num-seqs 256`, but no DFlash drafter and no AEON container env overrides. Upstream vLLM now boots this model on GB10 with FlashInfer CUTLASS NVFP4 linear kernels and VLLM CUTLASS MoE.
+
+Full sweep: 6 natural prompt categories x 8 concurrency levels (`1, 4, 8, 16, 32, 64, 128, 256`) = 48 benchmark points, **0 request errors**.
+
+| Category | c=1 tok/s | c=1 TTFT p50 | Peak aggregate tok/s | c=256 aggregate tok/s | c=256 TTFT p50 |
+|---|---:|---:|---:|---:|---:|
+| Coding | 49.12 | 130.7 ms | 3,356.61 @ c=256 | 3,356.61 | 542 ms |
+| Math | 48.79 | 134.0 ms | 3,006.60 @ c=256 | 3,006.60 | 1,078 ms |
+| Reasoning | 48.90 | 113.8 ms | 3,241.42 @ c=256 | 3,241.42 | 274 ms |
+| Prose | 48.86 | 115.9 ms | 3,222.85 @ c=256 | 3,222.85 | 662 ms |
+| Natural language | 49.38 | 72.4 ms | 3,418.94 @ c=256 | 3,418.94 | 650 ms |
+| Extraction / JSON | 47.34 | 120.6 ms | 3,674.70 @ c=256 | 3,674.70 | 385 ms |
+
+Use the stock community path when raw many-request aggregate throughput matters more than speculative single-stream speed. Use the DFlash image when you want the lower interactive TPOT and the integrated Gemma 4 DFlash serving recipe.
 
 ---
 
 ## Why This Is Hard: Gemma 4 on DGX Spark
 
-Running Gemma 4 NVFP4 on a DGX Spark is not a download-and-run situation. There is no pre-built path that works out of the box. Every layer of the stack — from the silicon to the serving framework to the model weights themselves — has a compatibility gap that had to be bridged. This section explains what those gaps are and how this release solves each one.
+Running Gemma 4 NVFP4 on a DGX Spark used to require a source-built stack. As of the 2026-05-06 community `vllm/vllm-openai:latest` image, upstream vLLM can boot this model on GB10, but the optimized DFlash path still needs a purpose-built image and a carefully pinned launch recipe. Every layer of the stack, from the silicon to the serving framework to the model weights themselves, has had compatibility gaps worth understanding.
 
 ### The DGX Spark Problem
 
-The NVIDIA DGX Spark ships with a **GB10 Grace Blackwell** chip — SM 12.1 on ARM64 (aarch64). This is bleeding-edge silicon that most of the ML ecosystem hasn't caught up to yet:
+The NVIDIA DGX Spark ships with a **GB10 Grace Blackwell** chip: SM 12.1 on ARM64 (aarch64). This is bleeding-edge silicon that much of the ML ecosystem is still catching up to:
 
-- **No pre-built vLLM wheels** exist for SM 12.1. The official PyPI releases target SM 8.0/8.9/9.0 (Ampere/Ada/Hopper). Installing `pip install vllm` gives you CUDA kernels compiled for the wrong GPU — they either crash with ABI mismatches or silently fall back to unoptimized paths.
+- **Python wheels remain risky on SM 12.1.** Official PyPI releases have historically targeted SM 8.0/8.9/9.0 (Ampere/Ada/Hopper). Installing `pip install vllm` can give you CUDA kernels compiled for the wrong GPU; use a tested Docker image or build from source.
 - **No pre-built FlashInfer wheels** for SM 12.1. FlashInfer provides the fused MoE dispatch kernels that make expert routing fast. Without it compiled for your architecture, MoE models can't use the optimized CUTLASS/Triton backends.
 - **ARM64 architecture** means many x86-only prebuilt binaries don't run at all. Even when packages claim CUDA support, the host-side code is often x86-compiled.
-- **273 GB/s memory bandwidth** — fast for a desktop-class device, but a fraction of what data center GPUs offer (H100: 3.35 TB/s, A100: 2 TB/s). This makes model architecture choice critical: dense models that need to read all parameters every token are bandwidth-starved here.
+- **273 GB/s memory bandwidth**: fast for a desktop-class device, but a fraction of what data center GPUs offer (H100: 3.35 TB/s, A100: 2 TB/s). This makes model architecture choice critical: dense models that need to read all parameters every token are bandwidth-starved here.
 
-The result: you can't just `docker pull` a stock vLLM image and serve Gemma 4. Everything must be compiled from source, targeting SM 12.1 specifically.
+The practical result: current stock vLLM can serve this model, but high-confidence production recipes still need to pin image versions, model format, attention backend, KV dtype, and concurrency settings instead of assuming any vLLM tag will behave the same way.
 
 ### The Gemma 4 Problem
 
-Gemma 4 is not just a new model — it's architecturally unusual in ways that break assumptions in existing tooling:
+Gemma 4 is not just a new model. It is architecturally unusual in ways that break assumptions in existing tooling:
 
 **1. Requires transformers v5+ (nothing else does yet)**
 
-Gemma 4 was the first major model to require the `transformers` v5 major version bump. Stock vLLM images ship with v4.x. Even if you have vLLM compiled for your GPU, it will fail to parse the Gemma 4 config without upgrading transformers — and upgrading transformers in a pre-built vLLM image risks breaking other dependencies due to API changes between v4 and v5.
+Gemma 4 was the first major model to require the `transformers` v5 major version bump. Older stock vLLM images shipped with v4.x and failed to parse the Gemma 4 config. Current community images may include transformers v5, but pin the version because v4/v5 API differences can still break model loading.
 
 **2. Heterogeneous attention head dimensions**
 
@@ -256,6 +284,19 @@ This is the original DGX Spark baseline image used for the baseline performance 
 
 Built from [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) with transformers v5 enabled and vLLM PR #41703 for Gemma 4 DFlash support. For other GPU architectures, see the [build-from-source instructions](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4#building-from-source) on the HuggingFace model page.
 
+### Stock Community Baseline Image
+
+**`vllm/vllm-openai:latest@sha256:9eff9734a30b6713a8566217d36f8277630fd2d31cec7f0a0292835901a23aa4`**
+
+| Component | Version |
+|---|---|
+| vLLM | 0.20.1 |
+| PyTorch | 2.11.0+cu130 |
+| transformers | 5.7.0 |
+| Speculative decoding | None |
+
+This image is useful as a current upstream reference point. It is not the AEON DFlash package and does not include the Gemma 4 DFlash drafter path.
+
 ## All Fixes Included
 
 This model required several post-quantization fixes to work correctly with vLLM. **All fixes are baked into the HuggingFace release** — no additional debugging needed:
@@ -272,7 +313,7 @@ Full technical details: [HuggingFace Model Card](https://huggingface.co/AEON-7/G
 
 | Model | Type | Size | tok/s (DGX Spark) | Links |
 |---|---|---|---|---|
-| **This model (Gemma 4 26B MoE + DFlash)** | MoE NVFP4 | 15.3 GB | 79.69 c=1 coding / 1,230 aggregate coding / 2,352 aggregate extraction | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
+| **This model (Gemma 4 26B MoE + DFlash)** | MoE NVFP4 | 15.3 GB | 93.03 c=1 coding / 1,236 aggregate coding / 2,340 aggregate extraction | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
 | **Gemma 4 31B DECKARD AWQ_FULL** | Dense NVFP4 | 20.5 GB | ~12-14 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4) \| [GitHub](https://github.com/AEON-7/Gemma-4-31B-DECKARD-HERETIC-Uncensored-NVFP4) |
 | **Gemma 4 31B DECKARD SVDQuant** | Dense NVFP4 | 20.9 GB | ~10-13 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4-SVDQuant) |
 | **Qwen3.5-27B Uncensored** | Dense NVFP4 | ~15 GB | ~15-18 | [HuggingFace](https://huggingface.co/AEON-7/Qwen3.5-27B-Uncensored-NVFP4) |
