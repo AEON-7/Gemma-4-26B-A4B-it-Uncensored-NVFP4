@@ -1,41 +1,59 @@
+[![Tips](https://img.shields.io/badge/%E2%98%95_Tips-Support_the_work-ff5e5b?style=flat)](#support-the-work)
+
 ## Quick Links
 
 | Resource | Link |
 |---|---|
 | **Model Weights + Full Documentation** | [AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4 on HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
-| **Pre-built vLLM Container (DGX Spark)** | [ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4](https://github.com/users/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4) |
+| **Baseline vLLM Container (DGX Spark)** | [`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4`](https://github.com/users/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4) |
+| **DFlash vLLM Container (DGX Spark)** | [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) |
+| **DFlash Drafter** | [z-lab/gemma-4-26B-A4B-it-DFlash](https://huggingface.co/z-lab/gemma-4-26B-A4B-it-DFlash) |
 
 ## Quick Start
 
 ```bash
-# 1. Pull the pre-built vLLM container (DGX Spark / SM 12.1)
-docker pull ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest
+# 1. Pull the DGX Spark / GB10 DFlash image.
+docker pull ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest
 
-[![☕ Tips](https://img.shields.io/badge/%E2%98%95_Tips-Support_the_work-ff5e5b?style=flat)](https://github.com/AEON-7/AEON-7#-support-the-work)
+# 2. Download the target model and DFlash drafter.
+mkdir -p models
+huggingface-cli download AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4 \
+  --local-dir ./models/gemma4
+huggingface-cli download z-lab/gemma-4-26B-A4B-it-DFlash \
+  --local-dir ./models/gemma4-dflash
 
-# 2. Download the model
-huggingface-cli download AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4 --local-dir ./model
-
-# 3. Run
-docker run --gpus all --ipc host -p 8000:8000 \
-  -e VLLM_NVFP4_GEMM_BACKEND=marlin \
-  -v ./model:/models/Gemma-4-26B-A4B-it-Uncensored-NVFP4 \
-  -v ./model/gemma4_patched.py:/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/gemma4.py \
-  ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest \
-  vllm serve /models/Gemma-4-26B-A4B-it-Uncensored-NVFP4 \
-    --served-model-name Gemma-4-26B-A4B-it-Uncensored-NVFP4 \
-    --max-model-len 262000 \
-    --gpu-memory-utilization 0.8 \
-    --trust-remote-code \
+# 3. Serve with native Blackwell FP4 kernels + DFlash k=15.
+docker run --gpus all --ipc host --network host \
+  -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
+  -e TORCH_MATMUL_PRECISION=high \
+  -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  -e VLLM_USE_FLASHINFER_SAMPLER=1 \
+  -v "$PWD/models/gemma4:/models/gemma4:ro" \
+  -v "$PWD/models/gemma4-dflash:/models/gemma4-dflash:ro" \
+  ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest \
+  vllm serve /models/gemma4 \
+    --served-model-name gemma4-aeon-uncensored gemma4-fast gemma4-deep \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --tensor-parallel-size 1 \
     --dtype auto \
+    --quantization compressed-tensors \
+    --load-format safetensors \
+    --max-model-len 32768 \
+    --max-num-seqs 256 \
+    --max-num-batched-tokens 32768 \
+    --gpu-memory-utilization 0.84 \
     --kv-cache-dtype fp8 \
     --enable-chunked-prefill \
-    --load-format safetensors \
     --enable-prefix-caching \
+    --trust-remote-code \
     --enable-auto-tool-choice \
     --tool-call-parser gemma4 \
-    --reasoning-parser gemma4
+    --attention-backend triton_attn \
+    --speculative-config '{"method":"dflash","model":"/models/gemma4-dflash","num_speculative_tokens":15,"attention_backend":"flash_attn"}'
 ```
+
+This profile is tuned for high-concurrency agent traffic on DGX Spark. For longer per-request contexts, raise `--max-model-len` and reduce `--max-num-seqs` to match the KV cache budget.
 
 ## Model Specs
 
@@ -65,6 +83,23 @@ Benchmarked with [`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest`](https://githu
 | 32 | 599 | 19 | 10.7s |
 | 64 | 951 | 15 | 13.5s |
 | 128 | 1,430 | 11 | 17.9s |
+
+## DFlash Performance (DGX Spark GB10)
+
+Benchmarked with [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). ASR/TTS containers were stopped during this run. The server used native FlashInfer CUTLASS NVFP4 GEMM, VLLM CUTLASS MoE, FP8 KV cache, CUDA graphs, `--max-num-batched-tokens 32768`, `--max-num-seqs 256`, and DFlash `num_speculative_tokens=15`.
+
+Full sweep: 6 natural prompt categories x 8 concurrency levels (`1, 4, 8, 16, 32, 64, 128, 256`) = 48 benchmark points, **0 request errors**.
+
+| Category | c=1 tok/s | Peak aggregate tok/s | c=256 aggregate tok/s | c=256 TTFT p50 |
+|---|---:|---:|---:|---:|
+| Coding | 79.69 | 1,230.12 @ c=128 | 1,004.31 | 3,127 ms |
+| Math | 70.88 | 1,064.15 @ c=128 | 1,038.93 | 1,834 ms |
+| Reasoning | 61.87 | 896.77 @ c=64 | 770.49 | 734 ms |
+| Prose | 37.48 | 628.40 @ c=64 | 581.30 | 1,205 ms |
+| Natural language | 39.31 | 723.84 @ c=256 | 723.84 | 1,177 ms |
+| Extraction / JSON | 156.19 | 2,352.04 @ c=256 | 2,352.04 | 896 ms |
+
+At very high concurrency, aggregate throughput remains strong but per-request decode latency rises. For interactive chat, the practical sweet spot is usually c=16-c=64. For background extraction and many short agent calls, c=128-c=256 is viable.
 
 ---
 
@@ -157,15 +192,16 @@ The fix is adding tokens 98, 100, and 101 to the `eos_token_id` list in `generat
 
 ### What's In The Container (The Special Sauce)
 
-The `ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4` container is a from-source build of the entire inference stack, targeting the GB10 specifically:
+The `ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash` container is a from-source build of the entire inference stack, targeting this model on GB10 specifically:
 
 | Component | What It Is | Why It Matters |
 |---|---|---|
-| **vLLM 0.19.1rc1** | Inference engine, compiled with `TORCH_CUDA_ARCH_LIST=12.1a` | All CUDA kernels (attention, MoE, quantization, sampling) emit native SM 12.1 machine code. No JIT recompilation, no fallback to PTX emulation. |
-| **FlashInfer 0.6.7** | Fused MoE dispatch kernels, compiled with `FLASHINFER_CUDA_ARCH_LIST=12.1a` | The `VLLM_CUTLASS` MoE backend uses FlashInfer's fused expert kernels. Without SM 12.1 compilation, MoE dispatch falls back to slow unfused paths. |
-| **PyTorch 2.12.0 + CUDA 13.0** | Framework + CUDA runtime | CUDA 13.0 is required for full SM 12.1 support. Older CUDA versions either don't recognize GB10 or fall back to compatibility mode. |
-| **transformers 5.5.0** | Model config/tokenizer loading | Gemma 4's architecture registration only exists in transformers v5+. The `--tf5` build flag handles the v4→v5 migration. |
-| **Marlin W4A16 kernel** | NVFP4 weight decompression for dense GEMM | GB10 has no native FP4 tensor cores (those are only on data center Blackwell like B200). Marlin decompresses FP4→FP16 on-the-fly during GEMM, optimized for the memory-bandwidth-bound decode regime. |
+| **vLLM 0.19.2rc1.dev130 + PR #41703** | Inference engine, compiled with `TORCH_CUDA_ARCH_LIST=12.1a` | Adds the Gemma 4 DFlash compatibility path while keeping native SM 12.1 kernels. |
+| **FlashInfer 0.6.9** | FP4 GEMM and sampler support, compiled with `FLASHINFER_CUDA_ARCH_LIST=12.1a` | Provides `FlashInferCutlassNvFp4LinearKernel` for native Blackwell FP4 GEMM. |
+| **PyTorch 2.11.0 + CUDA 13.2 runtime** | Framework + CUDA runtime | CUDA 13.x is required for full SM 12.1 support on GB10. |
+| **transformers 5.8.0** | Model config/tokenizer loading | Gemma 4 support requires transformers v5+. |
+| **DFlash drafter** | `z-lab/gemma-4-26B-A4B-it-DFlash`, k=15 | Speculative decoding for the Gemma 4 26B A4B target model. |
+| **Native FP4 CUTLASS kernels** | FlashInfer CUTLASS for linear layers, VLLM CUTLASS for MoE | Do not force Marlin on this image; the native FP4 path is faster on GB10. |
 | **TRITON_ATTN backend** | Attention computation | Handles Gemma 4's heterogeneous head dimensions (256/512) without numerical divergence. Other backends assume uniform head_dim. |
 | **torch.compile + CUDA graphs** | Graph capture and kernel fusion | Captures the full decode graph as a CUDA graph for each batch size 1-256. Eliminates Python overhead and CPU-GPU synchronization on the decode hot path. ~2.5s one-time compilation cost at startup. |
 
@@ -199,17 +235,26 @@ This is why architecture choice matters more than raw parameter count on bandwid
 
 ## Container Image Details
 
+### Baseline Image
+
 **`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest`**
+
+This is the original DGX Spark baseline image used for the baseline performance table above. It remains available for non-DFlash serving and compatibility comparisons.
+
+### DFlash Image
+
+**`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest`**
 
 | Component | Version |
 |---|---|
-| vLLM | 0.19.1rc1 (compiled for SM 12.1) |
-| PyTorch | 2.12.0 + CUDA 13.0 |
-| transformers | 5.5.0 |
-| FlashInfer | 0.6.7 |
+| vLLM | 0.19.2rc1.dev130+gabf82193b.d20260506, built from vLLM PR #41703 |
+| PyTorch | 2.11.0+cu130 |
+| transformers | 5.8.0 |
+| FlashInfer | 0.6.9 |
+| DFlash drafter | z-lab/gemma-4-26B-A4B-it-DFlash |
 | Target GPU | NVIDIA GB10 (DGX Spark, SM 12.1) |
 
-Built from [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) with `--tf5` flag. For other GPU architectures, see the [build-from-source instructions](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4#building-from-source) on the HuggingFace model page.
+Built from [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker) with transformers v5 enabled and vLLM PR #41703 for Gemma 4 DFlash support. For other GPU architectures, see the [build-from-source instructions](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4#building-from-source) on the HuggingFace model page.
 
 ## All Fixes Included
 
@@ -227,7 +272,7 @@ Full technical details: [HuggingFace Model Card](https://huggingface.co/AEON-7/G
 
 | Model | Type | Size | tok/s (DGX Spark) | Links |
 |---|---|---|---|---|
-| **This model (Gemma 4 26B MoE)** | MoE NVFP4 | 15.3 GB | ~43-50 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
+| **This model (Gemma 4 26B MoE + DFlash)** | MoE NVFP4 | 15.3 GB | 79.69 c=1 coding / 1,230 aggregate coding / 2,352 aggregate extraction | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
 | **Gemma 4 31B DECKARD AWQ_FULL** | Dense NVFP4 | 20.5 GB | ~12-14 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4) \| [GitHub](https://github.com/AEON-7/Gemma-4-31B-DECKARD-HERETIC-Uncensored-NVFP4) |
 | **Gemma 4 31B DECKARD SVDQuant** | Dense NVFP4 | 20.9 GB | ~10-13 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4-SVDQuant) |
 | **Qwen3.5-27B Uncensored** | Dense NVFP4 | ~15 GB | ~15-18 | [HuggingFace](https://huggingface.co/AEON-7/Qwen3.5-27B-Uncensored-NVFP4) |
@@ -236,7 +281,7 @@ Full technical details: [HuggingFace Model Card](https://huggingface.co/AEON-7/G
 
 ## Disclaimer, Liability Waiver, and Assumption of Risk
 
-**THIS IS AN UNCENSORED MODEL.** By downloading, accessing, or using this model, the associated container image ([`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4`](https://github.com/users/AEON-7/packages/container/package/vllm-spark-gemma4-nvfp4)), or any derivative works thereof, you expressly acknowledge and agree to the following:
+**THIS IS AN UNCENSORED MODEL.** By downloading, accessing, or using this model, the associated container image ([`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash)), or any derivative works thereof, you expressly acknowledge and agree to the following:
 
 ### Assumption of Risk
 
@@ -271,37 +316,31 @@ The authors, contributors, and distributors of this model and container image ("
 
 This model inherits the [Gemma license](https://ai.google.dev/gemma/terms) from Google.
 
-# Gemma 4 26B-A4B-it Uncensored NVFP4
+## Support the work
 
-NVFP4-quantized [Gemma 4 26B-A4B-it](https://huggingface.co/google/gemma-4-26B-A4B-it) (abliterated/uncensored) optimized for NVIDIA DGX Spark and Blackwell GPUs. Quantized from [TrevorJS/gemma-4-26B-A4B-it-uncensored](https://huggingface.co/TrevorJS/gemma-4-26B-A4B-it-uncensored) using [llmcompressor](https://github.com/vllm-project/llmcompressor).
-
----
-
-## ☕ Support the work
-
-If this release has been useful, tips are deeply appreciated — they go directly toward more compute, more models, and more open releases.
+If this release has been useful, tips are deeply appreciated. They go directly toward more compute, more models, and more open releases.
 
 <table align="center">
   <tr>
     <td align="center" width="50%">
-      <strong>₿ Bitcoin (BTC)</strong><br/>
+      <strong>Bitcoin (BTC)</strong><br/>
       <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/btc.png" alt="BTC QR" width="200"/><br/>
       <sub><code>bc1q09xmzn00q4z3c5raene0f3pzn9d9pvawfm0py4</code></sub>
     </td>
     <td align="center" width="50%">
-      <strong>Ξ Ethereum (ETH)</strong><br/>
+      <strong>Ethereum (ETH)</strong><br/>
       <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/eth.png" alt="ETH QR" width="200"/><br/>
       <sub><code>0x1512667F6D61454ad531d2E45C0a5d1fd82D0500</code></sub>
     </td>
   </tr>
   <tr>
     <td align="center" width="50%">
-      <strong>◎ Solana (SOL)</strong><br/>
+      <strong>Solana (SOL)</strong><br/>
       <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/sol.png" alt="SOL QR" width="200"/><br/>
       <sub><code>DgQsjHdAnT5PNLQTNpJdpLS3tYGpVcsHQCkpoiAKsw8t</code></sub>
     </td>
     <td align="center" width="50%">
-      <strong>ⓜ Monero (XMR)</strong><br/>
+      <strong>Monero (XMR)</strong><br/>
       <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/xmr.png" alt="XMR QR" width="200"/><br/>
       <sub><code>836XrSKw4R76vNi3QPJ5Fa9ugcyvE2cWmKSPv3AhpTNNKvqP8v5ba9JRL4Vh7UnFNjDz3E2GXZDVVenu3rkZaNdUFhjAvgd</code></sub>
     </td>
