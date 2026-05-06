@@ -86,7 +86,7 @@ Benchmarked with [`ghcr.io/aeon-7/vllm-spark-gemma4-nvfp4:latest`](https://githu
 
 ## DFlash Performance (DGX Spark GB10)
 
-Benchmarked with [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). ASR/TTS containers were stopped during this run. The server used native FlashInfer CUTLASS NVFP4 GEMM, VLLM CUTLASS MoE, FP8 KV cache, CUDA graphs, `--max-num-batched-tokens 32768`, `--max-num-seqs 256`, and DFlash `num_speculative_tokens=15`.
+Benchmarked with [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:latest`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). The server used native FlashInfer CUTLASS NVFP4 GEMM, VLLM CUTLASS MoE, FP8 KV cache, CUDA graphs, `--max-num-batched-tokens 32768`, `--max-num-seqs 256`, and DFlash `num_speculative_tokens=15`.
 
 Single-stream latency was measured in a dedicated c=1 pass with three natural-prompt samples per category. This is the number that best reflects interactive chat feel.
 
