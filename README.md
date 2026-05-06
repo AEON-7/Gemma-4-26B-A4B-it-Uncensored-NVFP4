@@ -26,6 +26,9 @@ docker run --gpus all --ipc host --network host \
   -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
   -e TORCH_MATMUL_PRECISION=high \
   -e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+  -e VLLM_USE_FLASHINFER_MOE_FP4=0 \
+  -e VLLM_TEST_FORCE_FP8_MARLIN=0 \
+  -e VLLM_NVFP4_GEMM_BACKEND=flashinfer-cutlass \
   -e VLLM_USE_FLASHINFER_SAMPLER=1 \
   -v "$PWD/models/gemma4:/models/gemma4:ro" \
   -v "$PWD/models/gemma4-dflash:/models/gemma4-dflash:ro" \
@@ -36,10 +39,10 @@ docker run --gpus all --ipc host --network host \
     --port 8000 \
     --tensor-parallel-size 1 \
     --dtype auto \
-    --max-model-len 32768 \
-    --max-num-seqs 256 \
+    --max-model-len 262144 \
+    --max-num-seqs 64 \
     --max-num-batched-tokens 32768 \
-    --gpu-memory-utilization 0.76 \
+    --gpu-memory-utilization 0.80 \
     --enable-chunked-prefill \
     --enable-prefix-caching \
     --trust-remote-code \
@@ -48,7 +51,9 @@ docker run --gpus all --ipc host --network host \
     --speculative-config '{"method":"dflash","model":"/models/gemma4-dflash","num_speculative_tokens":15,"attention_backend":"flash_attn"}'
 ```
 
-This profile is tuned for interactive and low-to-medium concurrency agent traffic on DGX Spark. `:latest` tracks the same v2 image. For longer per-request contexts, raise `--max-model-len` and reduce `--max-num-seqs` to match the KV cache budget.
+This default profile favors the model's full 262K-token context window while keeping DFlash enabled. On DGX Spark it boots with about 535K KV-cache tokens available, enough for roughly two simultaneous full-context requests or many more normal chat/tool-call requests under the `--max-num-seqs 64` scheduler cap. `:latest` tracks the same v2 image.
+
+For maximum short-context throughput benchmarking, use `--max-model-len 32768 --max-num-seqs 256 --gpu-memory-utilization 0.76`; that is the profile used for the saturation tables below.
 
 ## Model Specs
 
@@ -66,7 +71,7 @@ This profile is tuned for interactive and low-to-medium concurrency agent traffi
 
 ## Performance (DGX Spark GB10)
 
-Benchmarked with [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). The server used the official vLLM 0.20.1 base with the AEON DFlash overlay baked into a single container, native FlashInfer CUTLASS NVFP4 GEMM, VLLM CUTLASS MoE, CUDA graphs, `--gpu-memory-utilization 0.76`, `--max-num-batched-tokens 32768`, `--max-num-seqs 256`, and DFlash `num_speculative_tokens=15`.
+Benchmarked with [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). The server used the official vLLM 0.20.1 base with the AEON DFlash overlay baked into a single container, native FlashInfer CUTLASS NVFP4 GEMM, VLLM CUTLASS MoE, CUDA graphs, `--max-model-len 32768`, `--gpu-memory-utilization 0.76`, `--max-num-batched-tokens 32768`, `--max-num-seqs 256`, and DFlash `num_speculative_tokens=15`.
 
 Interactive sweep: these are the most relevant numbers for chat, coding, tool use, and small agent teams. The c=1 figures below are from a dedicated cooled single-stream run: one discard warmup, then five measured passes across natural prompt categories.
 
