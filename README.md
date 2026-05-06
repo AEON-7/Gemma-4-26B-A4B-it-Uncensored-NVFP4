@@ -68,27 +68,27 @@ This profile is tuned for interactive and low-to-medium concurrency agent traffi
 
 Benchmarked with [`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash) on NVIDIA DGX Spark (GB10, SM 12.1, 128 GB unified memory). The server used the official vLLM 0.20.1 base with the AEON DFlash overlay baked into a single container, native FlashInfer CUTLASS NVFP4 GEMM, VLLM CUTLASS MoE, CUDA graphs, `--gpu-memory-utilization 0.76`, `--max-num-batched-tokens 32768`, `--max-num-seqs 256`, and DFlash `num_speculative_tokens=15`.
 
-Interactive sweep: these are the most relevant numbers for chat, coding, tool use, and small agent teams.
+Interactive sweep: these are the most relevant numbers for chat, coding, tool use, and small agent teams. The c=1 figures below are from a dedicated cooled single-stream run: one discard warmup, then five measured passes across natural prompt categories.
 
 | Category | c=1 tok/s | c=1 TTFT p50 | c=1 TPOT p50 | c=4 agg tok/s | c=8 agg tok/s | c=16 agg tok/s |
 |---|---:|---:|---:|---:|---:|---:|
-| Coding | 81.60 | 94 ms | 11.83 ms | 223.92 | 481.38 | 740.22 |
-| Math | 56.19 | 880 ms | 13.28 ms | 248.34 | 421.30 | 614.34 |
-| Reasoning | 63.09 | 251 ms | 14.62 ms | 215.63 | 352.00 | 533.43 |
-| Prose | 39.81 | 258 ms | 23.83 ms | 152.79 | 247.07 | 405.97 |
-| Natural language | 44.52 | 238 ms | 21.10 ms | 183.90 | 321.85 | 491.19 |
-| Extraction / JSON | 65.92 | 811 ms | 5.46 ms | 411.85 | 743.66 | 1,299.40 |
+| Coding | 93.96 | 68.8 ms | 10.34 ms | 223.92 | 481.38 | 740.22 |
+| Math | 73.60 | 99.8 ms | 13.13 ms | 248.34 | 421.30 | 614.34 |
+| Reasoning | 60.74 | 92.4 ms | 16.05 ms | 215.63 | 352.00 | 533.43 |
+| Prose | 38.72 | 85.2 ms | 25.46 ms | 152.79 | 247.07 | 405.97 |
+| Natural language | 59.40 | 80.7 ms | 16.44 ms | 183.90 | 321.85 | 491.19 |
+| Extraction / JSON | 155.31 | 69.5 ms | 5.81 ms | 411.85 | 743.66 | 1,299.40 |
 
-High-concurrency sweep: 6 natural prompt categories x 8 concurrency levels (`1, 4, 8, 16, 32, 64, 128, 256`) = 48 benchmark points, **0 request errors**.
+High-concurrency sweep: 6 natural prompt categories x 8 concurrency levels (`1, 4, 8, 16, 32, 64, 128, 256`) = 48 benchmark points, **0 request errors**. Peak and c=256 columns come from the full saturation run; the c=1 column uses the dedicated cooled run above.
 
 | Category | c=1 tok/s | Peak aggregate tok/s | c=256 aggregate tok/s | c=256 TTFT p50 |
 |---|---:|---:|---:|---:|
-| Coding | 81.60 | 1,142.76 @ c=64 | 1,076.05 | 3,965 ms |
-| Math | 56.19 | 992.82 @ c=64 | 947.76 | 1,651 ms |
-| Reasoning | 63.09 | 874.56 @ c=256 | 874.56 | 782 ms |
-| Prose | 39.81 | 591.29 @ c=64 | 541.10 | 1,232 ms |
-| Natural language | 44.52 | 653.83 @ c=128 | 647.37 | 1,144 ms |
-| Extraction / JSON | 65.92 | 2,069.83 @ c=128 | 2,066.46 | 917 ms |
+| Coding | 93.96 | 1,142.76 @ c=64 | 1,076.05 | 3,965 ms |
+| Math | 73.60 | 992.82 @ c=64 | 947.76 | 1,651 ms |
+| Reasoning | 60.74 | 874.56 @ c=256 | 874.56 | 782 ms |
+| Prose | 38.72 | 591.29 @ c=64 | 541.10 | 1,232 ms |
+| Natural language | 59.40 | 653.83 @ c=128 | 647.37 | 1,144 ms |
+| Extraction / JSON | 155.31 | 2,069.83 @ c=128 | 2,066.46 | 917 ms |
 
 DFlash v2 is strongest for interactive decode and short agent/tool-call bursts. At very high concurrency, the drafter adds scheduling pressure and per-request latency rises; c=256 is best read as a saturation probe, not the recommended production target. For raw many-request aggregate throughput without speculation, compare against the stock vLLM baseline below.
 
@@ -232,13 +232,13 @@ For this **MoE model** (top-8 of 128 experts, ~2.8 GB active per token):
 273 GB/s / 2.8 GB = ~97 tok/s (theoretical max)
 ```
 
-We achieve **~40-82 tok/s single-stream** depending on prompt shape, with enough headroom to pass 1,000 aggregate tok/s on coding and more than 2,000 aggregate tok/s on extraction/JSON workloads. The gap from the theoretical limit comes from KV cache reads, attention computation, router overhead, drafter verification, and memory access patterns. But the key insight is that MoE turns a bandwidth-impossible problem (dense 27B) into a bandwidth-comfortable one.
+We achieve **~39-94 tok/s single-stream** on natural chat, prose, reasoning, math, and coding prompts, with extraction/JSON reaching **155 tok/s**. The same container has enough headroom to pass 1,000 aggregate tok/s on coding and more than 2,000 aggregate tok/s on extraction/JSON workloads. The gap from the theoretical limit comes from KV cache reads, attention computation, router overhead, drafter verification, and memory access patterns. But the key insight is that MoE turns a bandwidth-impossible problem (dense 27B) into a bandwidth-comfortable one.
 
 | Model Type | Params Read/Token | Max tok/s on GB10 | Practical tok/s |
 |---|---|---|---|
 | Dense 27B BF16 | ~54 GB | 5 | Not viable |
 | Dense 27B NVFP4 | ~13.5 GB | 20 | ~15 |
-| **MoE 26B top-8/128 NVFP4 + DFlash** | **~2.8 GB + drafter** | **97** | **40-82 c=1, 1K+ aggregate** |
+| **MoE 26B top-8/128 NVFP4 + DFlash** | **~2.8 GB + drafter** | **97** | **39-94 c=1 natural prompts, 155 extraction, 1K+ aggregate** |
 
 This is why architecture choice matters more than raw parameter count on bandwidth-limited hardware. A 26B MoE model at NVFP4 is faster than a dense 7B at BF16 on the same hardware.
 
@@ -290,7 +290,7 @@ Full technical details: [HuggingFace Model Card](https://huggingface.co/AEON-7/G
 
 | Model | Type | Size | tok/s (DGX Spark) | Links |
 |---|---|---|---|---|
-| **This model (Gemma 4 26B MoE + DFlash v2)** | MoE NVFP4 | 15.3 GB | 81.6 c=1 coding / 1,143 aggregate coding / 2,070 aggregate extraction | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
+| **This model (Gemma 4 26B MoE + DFlash v2)** | MoE NVFP4 | 15.3 GB | 93.96 c=1 coding / 1,143 aggregate coding / 2,070 aggregate extraction | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
 | **Gemma 4 31B DECKARD AWQ_FULL** | Dense NVFP4 | 20.5 GB | ~12-14 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4) \| [GitHub](https://github.com/AEON-7/Gemma-4-31B-DECKARD-HERETIC-Uncensored-NVFP4) |
 | **Gemma 4 31B DECKARD SVDQuant** | Dense NVFP4 | 20.9 GB | ~10-13 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4-SVDQuant) |
 | **Qwen3.5-27B Uncensored** | Dense NVFP4 | ~15 GB | ~15-18 | [HuggingFace](https://huggingface.co/AEON-7/Qwen3.5-27B-Uncensored-NVFP4) |
