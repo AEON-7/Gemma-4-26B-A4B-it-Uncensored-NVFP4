@@ -51,7 +51,7 @@ docker run --gpus all --ipc host --network host \
     --speculative-config '{"method":"dflash","model":"/models/gemma4-dflash","num_speculative_tokens":15,"attention_backend":"flash_attn"}'
 ```
 
-This default profile favors the model's full 262K-token context window while keeping DFlash enabled. On DGX Spark it boots with about 535K KV-cache tokens available, enough for roughly two simultaneous full-context requests or many more normal chat/tool-call requests under the `--max-num-seqs 64` scheduler cap. `:latest` tracks the same v2 image.
+This default profile is designed for agentic gateways. It leaves room for at least one large full-context working chat while still allowing the gateway to spin up many smaller short-lived subagents for tool calls, coding tasks, retrieval, and quick reasoning jobs, then terminate them when their work is done. On DGX Spark it boots with about 535K KV-cache tokens available, enough for roughly two simultaneous full-context requests or many more normal chat/tool-call requests under the `--max-num-seqs 64` scheduler cap. `:latest` tracks the same v2 image.
 
 For maximum short-context throughput benchmarking, use `--max-model-len 32768 --max-num-seqs 256 --gpu-memory-utilization 0.76`; that is the profile used for the saturation tables below.
 
