@@ -11,7 +11,8 @@
 ## Quick Start
 
 ```bash
-# 1. Pull the AEON vLLM Ultimate image (vLLM 0.22.1 + PR#44389, sm_121a — supersedes dflash:v2).
+# 1. Pull the AEON vLLM Ultimate image (vLLM 0.22.1 + PR#44389 NVFP4-KV + PR#40898/#41703
+#    DFlash drafter fixes, sm_121a). :latest = :2026-06-11-pr41703.
 docker pull ghcr.io/aeon-7/aeon-vllm-ultimate:latest
 
 # 2. Download the target model and DFlash drafter.
@@ -21,7 +22,8 @@ huggingface-cli download AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4 \
 huggingface-cli download z-lab/gemma-4-26B-A4B-it-DFlash \
   --local-dir ./models/gemma4-dflash
 
-# 3. Serve — OPTIMAL recipe: DFlash n=10, drafter flex_attention, body triton_attn.
+# 3. Serve — recipe for :latest (2026-06-11+): DFlash n=10, drafter flash_attn, body triton_attn.
+#    (The image ENTRYPOINT is bash, so override it with --entrypoint vllm.)
 docker run --gpus all --ipc host --network host \
   -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
   -e TORCH_MATMUL_PRECISION=high \
@@ -32,8 +34,9 @@ docker run --gpus all --ipc host --network host \
   -e VLLM_USE_FLASHINFER_SAMPLER=1 \
   -v "$PWD/models/gemma4:/models/gemma4:ro" \
   -v "$PWD/models/gemma4-dflash:/models/gemma4-dflash:ro" \
+  --entrypoint vllm \
   ghcr.io/aeon-7/aeon-vllm-ultimate:latest \
-  vllm serve /models/gemma4 \
+  serve /models/gemma4 \
     --served-model-name gemma4-aeon-uncensored gemma4-fast gemma4-deep \
     --host 0.0.0.0 \
     --port 8000 \
@@ -50,10 +53,14 @@ docker run --gpus all --ipc host --network host \
     --trust-remote-code \
     --enable-auto-tool-choice \
     --tool-call-parser gemma4 \
-    --speculative-config '{"method":"dflash","model":"/models/gemma4-dflash","num_speculative_tokens":10,"attention_backend":"flex_attention"}'
+    --reasoning-parser gemma4 \
+    --speculative-config '{"method":"dflash","model":"/models/gemma4-dflash","num_speculative_tokens":10,"attention_backend":"flash_attn"}'
 ```
 
-**Recipe notes (measured on this image):** `num_speculative_tokens=10` beats z-lab's default 15 here (+14% single-stream, higher acceptance, less wasted draft compute). The drafter **must** use `attention_backend: flex_attention` — `flash_attn` fails on the multimodal body (`partial multimodal token full attention not supported`); the body stays on `triton_attn` (Gemma's heterogeneous head dims). Do **not** set `--kv-cache-dtype fp8` — DFlash's non-causal drafter requires BF16 KV. The model's `config.json` already ships the vision ignore-list fix (`re:.*embed_vision.*`, `re:.*vision_tower.*`) so vLLM keeps the vision tower BF16.
+**Recipe notes — the drafter backend is tied to the image tag:**
+- **On `:latest` / `:2026-06-11-pr41703` (current):** the drafter **must** use `attention_backend: flash_attn` (enabled for multimodal Gemma targets by PR #41703's `use_mm_prefix=False`). `flex_attention` **crashes at the first request** on this image (non-contiguous KV view in the new KV-sharing path). `--enable-prefix-caching` is safe and recommended — soak-validated with DFlash (see the fixes section below).
+- **On the rollback tag `:2026-06-04-pr44389` (pre-fix):** the reverse — only `flex_attention` loads (`flash_attn` fails with `partial multimodal token full attention not supported`), the drafter silently runs without sliding-window support (~0% acceptance beyond 2k-token contexts), and `--enable-prefix-caching` triggers a slow acceptance collapse (see below). Not recommended.
+- Either way the body stays on `triton_attn` (Gemma's heterogeneous head dims), and do **not** set `--kv-cache-dtype fp8` — DFlash's non-causal drafter requires BF16 KV. `--reasoning-parser gemma4` cleanly splits `enable_thinking` output into `reasoning_content`. `num_speculative_tokens=10` is the value our production fleet runs; the drafter's trained block size is 16 and z-lab ships 15 — an n=10-vs-15 re-bench on the fixed drafter is pending (the earlier "10 beats 15" result was measured on the pre-fix drafter and shouldn't be treated as settled). The model's `config.json` already ships the vision ignore-list fix (`re:.*embed_vision.*`, `re:.*vision_tower.*`) so vLLM keeps the vision tower BF16.
 
 This default profile suits agentic gateways — one large full-context chat plus many short-lived subagents under the `--max-num-seqs 64` cap. For short-context throughput benchmarking, use `--max-model-len 32768 --max-num-seqs 256`.
 
@@ -71,9 +78,33 @@ This default profile suits agentic gateways — one large full-context chat plus
 | Vision | 27-layer ViT (BF16) |
 | Tool Calling | Native Gemma 4 format |
 
-## Performance (DGX Spark GB10) — AEON vLLM Ultimate + DFlash n=10
+## 2026-06-11 — DFlash drafter fixes (vLLM PR #40898 + #41703)
 
-Benchmarked on `ghcr.io/aeon-7/aeon-vllm-ultimate:latest` (vLLM 0.22.1+pr44389; FlashInfer CUTLASS NVFP4 GEMM + CUTLASS MoE) with the **optimal recipe**: DFlash `num_speculative_tokens=10`, drafter `attention_backend=flex_attention`, body `triton_attn`, BF16 KV. Per-category single-stream + concurrency sweep (c=1…128, fresh server per category, 0 request errors).
+All previously published DFlash numbers for this model were measured on a **defective drafter path**. We root-caused three vLLM-side defects in production and merged the upstream fixes (both PRs still open upstream) into [`aeon-vllm-ultimate:latest`](https://github.com/AEON-7/vllm-ultimate-dgx-spark):
+
+| Defect (pre-fix images) | Symptom | Fixed by |
+|---|---|---|
+| Rejected-token context-KV writes corrupted the drafter's paged KV cache; `--enable-prefix-caching` made the corruption persistent and self-accelerating | Draft acceptance decayed 34–56% → **0.0%** over minutes-to-hours of traffic → ~6× decode slowdown (144 → 24 tok/s), healed only by restart | [#41703](https://github.com/vllm-project/vllm/pull/41703) masks rejected/invalid context slots |
+| The z-lab drafter is 4-of-5-layers **sliding-window-2048**, but ran as full attention | Any request with >2k tokens of context got **~0% acceptance** (long chats, agent histories, big system prompts) | [#40898](https://github.com/vllm-project/vllm/pull/40898) adds DFlash SWA support |
+| Missing Gemma-4 sqrt(hidden) embed normalizer + final-logit softcap in the draft path | Depressed acceptance ceiling — mean acceptance length 4.4–6.6 vs z-lab's published 6.1–8.6 | [#41703](https://github.com/vllm-project/vllm/pull/41703) |
+
+**Validated results on the fixed image** (production profile: `--gpu-memory-utilization 0.68 --max-model-len 184320 --max-num-seqs 32 --enable-prefix-caching`, drafter `flash_attn`, n=10):
+
+| Gate | pre-fix | `2026-06-11-pr41703` |
+|---|---|---|
+| Long-context (~9k system prompt) draft acceptance | ~0–7% | **43.3% / MAL 5.3** |
+| Prefix-caching ON + fleet-burst + 10-min production soak | collapse to 0% in ~25 min | **52.0% / MAL 6.20** — improves under load |
+| Single-stream coding (c=1, greedy) | 144 tok/s fresh-boot, decaying to ~24 | **149–150 tok/s, sustained** |
+| Long-context (~9k) throughput | ~46 tok/s (APC unusable) | **78 tok/s** (APC accelerates the cached prefix) |
+| Live production probe (30-persona voice fleet) | — | **60% acceptance / MAL 7.0** |
+
+KV at this profile: 726k tokens / 3.94× concurrency at 180k ctx. Mean acceptance length now lands in z-lab's published range for the first time. A full per-category concurrency re-sweep on the fixed image is pending; the section below is the historical pre-fix sweep.
+
+## Performance — historical short-context sweep (pre-fix image, 2026-06-09)
+
+> ⚠️ Measured on the **pre-fix** image (`:2026-06-04-pr44389`) with the flex-drafter recipe that **crashes on the current `:latest`** — and with the broken drafter (no SWA, no embed normalizer), short-context prompts only. Kept as an honest historical floor; the fixed image measures higher (see above). Long-context performance on this image was far worse than the table suggests (~0% acceptance beyond 2k-token contexts).
+
+Per-category single-stream + concurrency sweep (c=1…128, fresh server per category, 0 request errors), DFlash n=10, BF16 KV:
 
 | Category | c=1 tok/s | Peak aggregate tok/s | vs prior DFlash v2 (n=15) |
 |---|---:|---:|---|
@@ -84,9 +115,9 @@ Benchmarked on `ghcr.io/aeon-7/aeon-vllm-ultimate:latest` (vLLM 0.22.1+pr44389; 
 | Natural language | 53.8 | 684 @ c=128 | +5% peak |
 | Prose | 36.5 | 486 @ c=128 | — |
 
-The new image + `n=10` recipe **beats the prior DFlash v2 (n=15) numbers on single-stream and peak aggregate for the reasoning-heavy categories by 20–50%** — `n=10` accepts more per draft and wastes less compute than z-lab's default 15. DFlash is strongest for interactive decode and structured/reasoning bursts.
+This pre-fix sweep showed `n=10` beating z-lab's default 15 by 20–50% on the reasoning-heavy categories — but both arms ran the broken drafter, so treat the n=10-vs-15 conclusion as **unsettled** pending the re-bench on the fixed image (drafter block size is 16).
 
-**For maximum many-request aggregate throughput** (very high concurrency, c≥128), serve **without** the drafter — DFlash's draft+verify becomes overhead once the batch is compute-bound (the drafter also destabilizes the server at c=256). The stock no-DFlash path (below) sustains ~3,000–3,700 tok/s at c=256 and remains the recommended profile for raw batch throughput.
+**For maximum many-request aggregate throughput** (very high concurrency, c≥128), serving **without** the drafter measured best on the pre-fix image (~3,000–3,700 tok/s at c=256 via the stock path below). Note the "drafter destabilizes at c=256" behavior observed then is plausibly the now-fixed KV-corruption defect — the high-concurrency crossover needs re-measuring on the fixed image before treating it as current guidance.
 
 ## Stock Community vLLM Baseline (No DFlash)
 
@@ -109,7 +140,7 @@ Use the stock community path when raw many-request aggregate throughput matters 
 
 ## Why This Is Hard: Gemma 4 on DGX Spark
 
-Running Gemma 4 NVFP4 on a DGX Spark used to require a source-built stack. As of the 2026-05-06 community `vllm/vllm-openai:latest` image, upstream vLLM can boot this model on GB10, and AEON's v2 image packages the optimized DFlash path as a single pull-and-run container. Every layer of the stack, from the silicon to the serving framework to the model weights themselves, has had compatibility gaps worth understanding.
+Running Gemma 4 NVFP4 on a DGX Spark used to require a source-built stack. As of the 2026-05-06 community `vllm/vllm-openai:latest` image, upstream vLLM can boot this model on GB10, and AEON's [`aeon-vllm-ultimate`](https://github.com/AEON-7/vllm-ultimate-dgx-spark) image packages the optimized (and now corrected — see the fixes section above) DFlash path as a single pull-and-run container. Every layer of the stack, from the silicon to the serving framework to the model weights themselves, has had compatibility gaps worth understanding.
 
 ### The DGX Spark Problem
 
@@ -136,15 +167,15 @@ Most models have uniform head dimensions across all layers. Gemma 4 has `head_di
 
 **3. Hybrid sliding-window + full-attention layers**
 
-Of the 30 layers, 25 use a sliding window of 1024 tokens and 5 use full global attention. The sliding-window layers use regular MoE (128 experts, top-8), while the full-attention layers use dense MLPs. This means the model has two completely different layer types with different weight shapes, different compute patterns, and different KV cache requirements — all interleaved.
+Of the 30 layers, 25 use a sliding window of 1024 tokens and 5 use full global attention; all 30 carry MoE blocks (128 experts, top-8 — checkpoint-verified: router + expert tensors in every layer). The two attention types have different compute patterns and KV cache requirements — interleaved through the stack.
 
 **4. Massive MoE expert count**
 
-128 experts per layer with top-8 routing. That's 128 x 25 = 3,200 expert weight matrices in the MoE layers alone, each with 4 NVFP4 tensors (weight_packed, weight_scale, weight_global_scale, input_global_scale). The total tensor count in this model is **47,648**. Loading and routing these correctly requires FusedMoE kernels that can handle the stacked expert format, and the compressed-tensors naming convention doesn't match what vLLM expects (see below).
+128 experts per layer with top-8 routing across all 30 layers. That's 128 x 30 = 3,840 expert weight blocks, each with 4 NVFP4 tensors (weight_packed, weight_scale, weight_global_scale, input_global_scale). The total tensor count in this model is **47,648**. Loading and routing these correctly requires FusedMoE kernels that can handle the stacked expert format, and the compressed-tensors naming convention doesn't match what vLLM expects (see below).
 
 ### The NVFP4 Quantization Problem
 
-NVFP4 (4-bit NormalFloat) quantization is how we get a 26B-parameter model into 15.3 GB. But there are two completely different NVFP4 formats in the ecosystem, and they are not compatible:
+NVFP4 (NVIDIA 4-bit floating point — E2M1 elements with block scales) is how we get a 26B-parameter model into 15.3 GB. But there are two completely different NVFP4 formats in the ecosystem, and they are not compatible:
 
 **ModelOpt NVFP4** (NVIDIA's TensorRT-LLM toolchain): Stores weights as `weight`, `weight_scale_inverse`, `input_scale`. This is what NVIDIA's own tools produce and what most vLLM NVFP4 code paths expect.
 
@@ -196,18 +227,18 @@ The fix is adding tokens 98, 100, and 101 to the `eos_token_id` list in `generat
 
 ### What's In The Container (The Special Sauce)
 
-The `ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2` container starts from the official community vLLM 0.20.1 runtime and bakes in the AEON Gemma 4 DFlash overlay. Users pull one image; no local patching or source build is required.
+The current image is [`ghcr.io/aeon-7/aeon-vllm-ultimate:latest`](https://github.com/AEON-7/vllm-ultimate-dgx-spark) (= `:2026-06-11-pr41703`). Users pull one image; no local patching or source build is required.
 
 | Component | What It Is | Why It Matters |
 |---|---|---|
-| **Official vLLM 0.20.1 base** | Upstream `vllm/vllm-openai` runtime | Keeps the strong low-concurrency behavior of the community image while adding the DFlash path. |
-| **AEON DFlash overlay** | Python patchset baked into site-packages at build time | Adds `method="dflash"` support, Gemma 4 drafter wiring, and backend isolation so users do not apply patches manually. |
-| **PyTorch 2.11.0 + CUDA 13 runtime** | Framework + CUDA runtime from the official image | Provides current SM 12.1 support for GB10. |
-| **transformers 5.7.0+** | Model config/tokenizer loading | Gemma 4 support requires transformers v5+. |
-| **DFlash drafter** | `z-lab/gemma-4-26B-A4B-it-DFlash`, k=15 | Speculative decoding for the Gemma 4 26B A4B target model. |
+| **vLLM 0.22.1-lineage + PR #44389** | main@2026-06-05 + Triton NVFP4 KV cache cherry-pick | Up to 3× KV capacity opt-in (`--kv-cache-dtype nvfp4`; causal speculators only). |
+| **PR #40898 + #41703 overlay** | DFlash drafter fixes merged ahead of upstream | Rejected-slot KV-write masking (no more acceptance collapse under prefix caching), drafter sliding-window support, Gemma-4 embed normalizer + logit softcap, `flash_attn` drafter on multimodal Gemma targets. |
+| **AEON sm_121a patches** | 3 idempotent runtime patches | GB10 correctness (optional-import lazy binding, hybrid block-size None guards, CUDA-graph capture-size alignment for spec decode). |
+| **PyTorch 2.11.0 + CUDA 13** | Framework + runtime | SM 12.1 (GB10) support. |
+| **transformers 5.10 dev** | Model config/tokenizer loading | Recognizes `gemma4_unified` and other bleeding-edge classes. |
+| **DFlash drafter** | `z-lab/gemma-4-26B-A4B-it-DFlash` (mount separately) | 5-layer SWA-2048 block-diffusion drafter — now actually run with sliding windows. |
 | **Native FP4 CUTLASS kernels** | FlashInfer CUTLASS for linear layers, VLLM CUTLASS for MoE | Do not force Marlin on this image; the native FP4 path is faster on GB10. |
-| **TRITON_ATTN backend** | Attention computation | Handles Gemma 4's heterogeneous head dimensions (256/512) without numerical divergence. Other backends assume uniform head_dim. |
-| **FlashAttention drafter backend** | DFlash draft attention | Keeps non-causal DFlash attention on a backend that supports it while the Gemma target model stays on Triton attention. |
+| **TRITON_ATTN body / FLASH_ATTN drafter** | Attention computation | Triton handles Gemma 4's heterogeneous head dims (256/512); the drafter's non-causal attention runs on FlashAttention (required on this image). |
 | **torch.compile + CUDA graphs** | Graph capture and kernel fusion | Captures decode graphs for the configured batch sizes, reducing Python overhead on the decode hot path. |
 
 ### Why MoE Makes This Possible
@@ -228,34 +259,32 @@ For this **MoE model** (top-8 of 128 experts, ~2.8 GB active per token):
 273 GB/s / 2.8 GB = ~97 tok/s (theoretical max)
 ```
 
-We achieve **~39-94 tok/s single-stream** on natural chat, prose, reasoning, math, and coding prompts, with extraction/JSON reaching **155 tok/s**. The same container has enough headroom to pass 1,000 aggregate tok/s on coding and more than 2,000 aggregate tok/s on extraction/JSON workloads. The gap from the theoretical limit comes from KV cache reads, attention computation, router overhead, drafter verification, and memory access patterns. But the key insight is that MoE turns a bandwidth-impossible problem (dense 27B) into a bandwidth-comfortable one.
+We achieve **~37–158 tok/s single-stream** depending on category — coding sustains 149–150 tok/s measured on the fixed image; prose ~37 and extraction/JSON ~158 from the pre-fix short-context sweep (a floor; fixed-image re-sweep pending) — with aggregate throughput passing 1,700 tok/s on coding (pre-fix sweep) and ~3,700 tok/s on extraction via the stock no-drafter path. The gap from the theoretical limit comes from KV cache reads, attention computation, router overhead, drafter verification, and memory access patterns. But the key insight is that MoE turns a bandwidth-impossible problem (dense 27B) into a bandwidth-comfortable one.
 
 | Model Type | Params Read/Token | Max tok/s on GB10 | Practical tok/s |
 |---|---|---|---|
 | Dense 27B BF16 | ~54 GB | 5 | Not viable |
 | Dense 27B NVFP4 | ~13.5 GB | 20 | ~15 |
-| **MoE 26B top-8/128 NVFP4 + DFlash** | **~2.8 GB + drafter** | **97** | **39-94 c=1 natural prompts, 155 extraction, 1K+ aggregate** |
+| **MoE 26B top-8/128 NVFP4 + DFlash** | **~2.8 GB + drafter** | **97** | **149–150 coding (fixed image); ~54 natural chat / ~158 extraction (pre-fix sweep); 1.7K+ aggregate** |
 
 This is why architecture choice matters more than raw parameter count on bandwidth-limited hardware. A 26B MoE model at NVFP4 is faster than a dense 7B at BF16 on the same hardware.
 
 ## Container Image Details
 
-### DFlash v2 Image
+### AEON vLLM Ultimate (recommended)
 
-**`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash:v2`**
-
-`latest` currently points to the same v2 image.
+**`ghcr.io/aeon-7/aeon-vllm-ultimate:latest`** (= `:2026-06-11-pr41703`) — [repo + full card](https://github.com/AEON-7/vllm-ultimate-dgx-spark)
 
 | Component | Version |
 |---|---|
-| vLLM | 0.20.1 official base + AEON DFlash overlay |
+| vLLM | 0.22.1-lineage (main@2026-06-05) + PR #44389 NVFP4-KV + **PR #40898/#41703 DFlash fixes** |
 | PyTorch | 2.11.0+cu130 |
-| transformers | 5.7.0+ |
-| AEON overlay revision | `06e292d0ce7e0ddc4f84bd200c3bdf55c7875eb7` |
-| DFlash drafter | z-lab/gemma-4-26B-A4B-it-DFlash |
-| Target GPU | NVIDIA GB10 (DGX Spark, SM 12.1) |
+| transformers | 5.10.0.dev (HEAD) |
+| flashinfer | 0.6.8.post1 |
+| DFlash drafter | mount `z-lab/gemma-4-26B-A4B-it-DFlash`, drafter backend `flash_attn` |
+| Target GPU | NVIDIA GB10 (DGX Spark, sm_121a); also RTX 50-series (sm_120) |
 
-The v2 image is the recommended default for real interactive use cases. Previous tags such as `v0.1.0` and `pr41703-20260506` remain available for historical comparison and high-concurrency experiments.
+Pinned tags: `:2026-06-11-pr41703` (current `:latest`), `:2026-06-04-pr44389` (pre-fix rollback — flex drafter only, prefix caching NOT safe with DFlash). The older `aeon-gemma-4-26b-a4b-dflash:v2` (vLLM 0.20.1) lineage is superseded and kept only for historical comparison.
 
 ### Stock Community Baseline Image
 
@@ -286,7 +315,7 @@ Full technical details: [HuggingFace Model Card](https://huggingface.co/AEON-7/G
 
 | Model | Type | Size | tok/s (DGX Spark) | Links |
 |---|---|---|---|---|
-| **This model (Gemma 4 26B MoE + DFlash v2)** | MoE NVFP4 | 15.3 GB | 93.96 c=1 coding / 1,143 aggregate coding / 2,070 aggregate extraction | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
+| **This model (Gemma 4 26B MoE + DFlash)** | MoE NVFP4 | 15.3 GB | 149–150 c=1 coding sustained (fixed image) / 1,724 aggregate coding (pre-fix sweep; re-sweep pending) / ~3,700 aggregate extraction (stock, no-drafter) | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4) |
 | **Gemma 4 31B DECKARD AWQ_FULL** | Dense NVFP4 | 20.5 GB | ~12-14 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4) \| [GitHub](https://github.com/AEON-7/Gemma-4-31B-DECKARD-HERETIC-Uncensored-NVFP4) |
 | **Gemma 4 31B DECKARD SVDQuant** | Dense NVFP4 | 20.9 GB | ~10-13 | [HuggingFace](https://huggingface.co/AEON-7/Gemma-4-31B-it-DECKARD-HERETIC-Uncensored-NVFP4-SVDQuant) |
 | **Qwen3.5-27B Uncensored** | Dense NVFP4 | ~15 GB | ~15-18 | [HuggingFace](https://huggingface.co/AEON-7/Qwen3.5-27B-Uncensored-NVFP4) |
@@ -295,7 +324,7 @@ Full technical details: [HuggingFace Model Card](https://huggingface.co/AEON-7/G
 
 ## Disclaimer, Liability Waiver, and Assumption of Risk
 
-**THIS IS AN UNCENSORED MODEL.** By downloading, accessing, or using this model, the associated container image ([`ghcr.io/aeon-7/aeon-gemma-4-26b-a4b-dflash`](https://github.com/users/AEON-7/packages/container/package/aeon-gemma-4-26b-a4b-dflash)), or any derivative works thereof, you expressly acknowledge and agree to the following:
+**THIS IS AN UNCENSORED MODEL.** By downloading, accessing, or using this model, the associated container image ([`ghcr.io/aeon-7/aeon-vllm-ultimate`](https://github.com/AEON-7/vllm-ultimate-dgx-spark/pkgs/container/aeon-vllm-ultimate)), or any derivative works thereof, you expressly acknowledge and agree to the following:
 
 ### Assumption of Risk
 
