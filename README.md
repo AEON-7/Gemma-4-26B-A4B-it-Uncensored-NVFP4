@@ -1,3 +1,78 @@
+---
+license: gemma
+library_name: transformers
+pipeline_tag: text-generation
+base_model: TrevorJS/gemma-4-26B-A4B-it-uncensored
+tags:
+  # Model family
+  - gemma4
+  - gemma
+  - google
+  # Architecture
+  - moe
+  - mixture-of-experts
+  - sparse-moe
+  - transformer
+  - 26b
+  - 4b-active
+  # Quantization
+  - nvfp4
+  - fp4
+  - 4-bit
+  - quantized
+  - compressed-tensors
+  - llmcompressor
+  - weight-quantization
+  # Capabilities
+  - vision
+  - multimodal
+  - text-generation
+  - image-text-to-text
+  - tool-calling
+  - function-calling
+  - reasoning
+  - chat
+  - instruct
+  - agentic
+  - coding
+  # Uncensored / abliterated
+  - uncensored
+  - abliterated
+  - unfiltered
+  # Hardware
+  - dgx-spark
+  - blackwell
+  - gb10
+  - grace-blackwell
+  - nvidia
+  - gpu
+  - arm64
+  - aarch64
+  - edge
+  - on-device
+  # Framework / serving
+  - vllm
+  - openai-api
+  - openai-compatible
+  - dflash
+  - speculative-decoding
+  # Performance
+  - fp8-kv-cache
+  - flashinfer-cutlass
+  - native-fp4
+  - prefix-caching
+  - chunked-prefill
+  - sliding-window-attention
+  # Other
+  - english
+  - safetensors
+  - production-ready
+model_type: gemma4
+quantization: nvfp4
+language:
+  - en
+---
+
 [![Tips](https://img.shields.io/badge/%E2%98%95_Tips-Support_the_work-ff5e5b?style=flat)](#support-the-work)
 
 ## Quick Links
@@ -10,20 +85,23 @@
 
 ## Quick Start
 
+Complete copy-paste recipe — pull the container, pull the model (fresh), pull the DFlash drafter (fresh), then serve with the vetted DGX Spark recipe (DFlash n=10, drafter `flash_attn`, body `triton_attn`). The recipe notes below cover tag-specific drafter backends and the production GPU-util / context-tier profile; see also [Container Image Details](#container-image-details).
+
 ```bash
 # 1. Pull the AEON vLLM Ultimate image (vLLM 0.23.0 sm_121a from-source + PR#44389 NVFP4-KV +
 #    PR#40898/#41703 DFlash drafter fixes + DFlash high-concurrency fix).
 #    :latest = :2026-06-18-v0.23.0-dflashfix; rollback :2026-06-11-pr41703.
 docker pull ghcr.io/aeon-7/aeon-vllm-ultimate:latest
 
-# 2. Download the target model and DFlash drafter.
-mkdir -p models
+# 2. Download the target model (fresh).
 huggingface-cli download AEON-7/Gemma-4-26B-A4B-it-Uncensored-NVFP4 \
   --local-dir ./models/gemma4
+
+# 3. Download the DFlash drafter (fresh — pull the latest z-lab build).
 huggingface-cli download z-lab/gemma-4-26B-A4B-it-DFlash \
   --local-dir ./models/gemma4-dflash
 
-# 3. Serve — recipe for :latest (2026-06-11+): DFlash n=10, drafter flash_attn, body triton_attn.
+# 4. Serve — recipe for :latest (2026-06-11+): DFlash n=10, drafter flash_attn, body triton_attn.
 #    (The image ENTRYPOINT is bash, so override it with --entrypoint vllm.)
 docker run --gpus all --ipc host --network host \
   -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
@@ -421,31 +499,27 @@ This model inherits the [Gemma license](https://ai.google.dev/gemma/terms) from 
 
 If this release has been useful, tips are deeply appreciated. They go directly toward more compute, more models, and more open releases.
 
-<table align="center">
-  <tr>
-    <td align="center" width="50%">
-      <strong>Bitcoin (BTC)</strong><br/>
-      <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/btc.png" alt="BTC QR" width="200"/><br/>
-      <sub><code>bc1q09xmzn00q4z3c5raene0f3pzn9d9pvawfm0py4</code></sub>
-    </td>
-    <td align="center" width="50%">
-      <strong>Ethereum (ETH)</strong><br/>
-      <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/eth.png" alt="ETH QR" width="200"/><br/>
-      <sub><code>0x1512667F6D61454ad531d2E45C0a5d1fd82D0500</code></sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center" width="50%">
-      <strong>Solana (SOL)</strong><br/>
-      <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/sol.png" alt="SOL QR" width="200"/><br/>
-      <sub><code>DgQsjHdAnT5PNLQTNpJdpLS3tYGpVcsHQCkpoiAKsw8t</code></sub>
-    </td>
-    <td align="center" width="50%">
-      <strong>Monero (XMR)</strong><br/>
-      <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/xmr.png" alt="XMR QR" width="200"/><br/>
-      <sub><code>836XrSKw4R76vNi3QPJ5Fa9ugcyvE2cWmKSPv3AhpTNNKvqP8v5ba9JRL4Vh7UnFNjDz3E2GXZDVVenu3rkZaNdUFhjAvgd</code></sub>
-    </td>
-  </tr>
+<table align="left">
+  <tr><td align="left">
+    <strong>Bitcoin (BTC)</strong><br/>
+    <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/btc.png" alt="QR" width="200"/><br/>
+    <sub><code>bc1q09xmzn00q4z3c5raene0f3pzn9d9pvawfm0py4</code></sub>
+  </td></tr>
+  <tr><td align="left">
+    <strong>Ethereum (ETH)</strong><br/>
+    <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/eth.png" alt="QR" width="200"/><br/>
+    <sub><code>0x1512667F6D61454ad531d2E45C0a5d1fd82D0500</code></sub>
+  </td></tr>
+  <tr><td align="left">
+    <strong>Solana (SOL)</strong><br/>
+    <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/sol.png" alt="QR" width="200"/><br/>
+    <sub><code>DgQsjHdAnT5PNLQTNpJdpLS3tYGpVcsHQCkpoiAKsw8t</code></sub>
+  </td></tr>
+  <tr><td align="left">
+    <strong>Monero (XMR)</strong><br/>
+    <img src="https://raw.githubusercontent.com/AEON-7/AEON-7/main/assets/qr/xmr.png" alt="QR" width="200"/><br/>
+    <sub><code>836XrSKw4R76vNi3QPJ5Fa9ugcyvE2cWmKSPv3AhpTNNKvqP8v5ba9JRL4Vh7UnFNjDz3E2GXZDVVenu3rkZaNdUFhjAvgd</code></sub>
+  </td></tr>
 </table>
 
 > **Ethereum L2s (Base, Arbitrum, Optimism, Polygon, etc.) and EVM-compatible tokens** can be sent to the same Ethereum address.
