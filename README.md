@@ -11,8 +11,9 @@
 ## Quick Start
 
 ```bash
-# 1. Pull the AEON vLLM Ultimate image (vLLM 0.22.1 + PR#44389 NVFP4-KV + PR#40898/#41703
-#    DFlash drafter fixes, sm_121a). :latest = :2026-06-11-pr41703.
+# 1. Pull the AEON vLLM Ultimate image (vLLM 0.23.0 sm_121a from-source + PR#44389 NVFP4-KV +
+#    PR#40898/#41703 DFlash drafter fixes + DFlash high-concurrency fix).
+#    :latest = :2026-06-18-v0.23.0-dflashfix; rollback :2026-06-11-pr41703.
 docker pull ghcr.io/aeon-7/aeon-vllm-ultimate:latest
 
 # 2. Download the target model and DFlash drafter.
@@ -58,11 +59,46 @@ docker run --gpus all --ipc host --network host \
 ```
 
 **Recipe notes — the drafter backend is tied to the image tag:**
-- **On `:latest` / `:2026-06-11-pr41703` (current):** the drafter **must** use `attention_backend: flash_attn` (enabled for multimodal Gemma targets by PR #41703's `use_mm_prefix=False`). `flex_attention` **crashes at the first request** on this image (non-contiguous KV view in the new KV-sharing path). `--enable-prefix-caching` is safe and recommended — soak-validated with DFlash (see the fixes section below).
+- **On `:latest` / `:2026-06-18-v0.23.0-dflashfix` (current; same behavior as the `:2026-06-11-pr41703` fix lineage):** the drafter **must** use `attention_backend: flash_attn` (enabled for multimodal Gemma targets by PR #41703's `use_mm_prefix=False`). `flex_attention` **crashes at the first request** on this image (non-contiguous KV view in the new KV-sharing path). `--enable-prefix-caching` is safe and recommended — soak-validated with DFlash (see the fixes section below).
 - **On the rollback tag `:2026-06-04-pr44389` (pre-fix):** the reverse — only `flex_attention` loads (`flash_attn` fails with `partial multimodal token full attention not supported`), the drafter silently runs without sliding-window support (~0% acceptance beyond 2k-token contexts), and `--enable-prefix-caching` triggers a slow acceptance collapse (see below). Not recommended.
 - Either way the body stays on `triton_attn` (Gemma's heterogeneous head dims), and do **not** set `--kv-cache-dtype fp8` — DFlash's non-causal drafter requires BF16 KV. `--reasoning-parser gemma4` cleanly splits `enable_thinking` output into `reasoning_content`. `num_speculative_tokens=10` is the value our production fleet runs; the drafter's trained block size is 16 and z-lab ships 15 — an n=10-vs-15 re-bench on the fixed drafter is pending (the earlier "10 beats 15" result was measured on the pre-fix drafter and shouldn't be treated as settled). The model's `config.json` already ships the vision ignore-list fix (`re:.*embed_vision.*`, `re:.*vision_tower.*`) so vLLM keeps the vision tower BF16.
 
 This default profile suits agentic gateways — one large full-context chat plus many short-lived subagents under the `--max-num-seqs 64` cap. For short-context throughput benchmarking, use `--max-model-len 32768 --max-num-seqs 256`.
+
+## Performance — DGX Spark: stock vanilla vs maximally optimized (v0.23.0)
+
+**This is the headline.** On DGX Spark / GB10 the AEON DFlash container turns the default "it runs, but it's slow" stock baseline into a usable long-context local agent model — and the v0.23.0 build now scales cleanly to 64 concurrent requests where the prior image crashed under concurrent speculative decoding.
+
+<p align="center"><img src="assets/perf/gemma26b_stock_vs_optimized.svg" width="100%" alt="Stock vanilla vLLM vs AEON-optimized single-stream decode tok/s by category — up to 4.3x faster, 2.5x average"></p>
+<p align="center"><img src="assets/perf/gemma26b_concurrency.svg" width="100%" alt="Aggregate throughput scaling from 1 to 64 concurrent requests on aeon-vllm-ultimate:latest — up to 1937 tok/s at c=64"></p>
+
+Measured on the current production image **`ghcr.io/aeon-7/aeon-vllm-ultimate:latest`** (vLLM 0.23.0 sm_121a from-source build + DFlash `num_speculative_tokens: 10`, drafter `flash_attn`, body `triton_attn`), single-stream (c=1), by category:
+
+| Category | 🟢 Decode tok/s | TTFT p50 | TPOT p50 | Prefill (PP) | DFlash accept | vs stock |
+|---|---:|---:|---:|---:|---:|---:|
+| Coding | **155.8** | 83 ms | 6.4 ms | 601 tok/s | 58.9% | **3.2×** |
+| Math | **127.8** | 145 ms | 7.8 ms | 420 tok/s | 48.7% | **2.6×** |
+| Reasoning | **118.9** | 105 ms | 8.4 ms | 439 tok/s | 43.9% | **2.4×** |
+| Prose | **49.8** | 105 ms | 20.1 ms | 324 tok/s | 11.1% | 1.0× |
+| Natural language | **67.3** | 97 ms | 14.9 ms | 393 tok/s | 20.0% | **1.4×** |
+| Extraction / JSON | **202.4** | 85 ms | 4.9 ms | 602 tok/s | 77.5% | **4.3×** |
+
+vs a **stock vanilla `vllm/vllm-openai` 0.20.1 baseline of ~47–49 tok/s** (no DFlash, no sm_121a optimizations) → **up to 4.3× faster decode (≈2.5× average)**, and it now scales cleanly to **c=64 concurrent** (1,937 tok/s aggregate on coding) with no crash. See [What we fixed for the DGX Spark](#what-we-fixed-for-the-dgx-spark).
+
+> **Stock baseline note:** the stock/un-optimized figures are vanilla vLLM (`vllm/vllm-openai` 0.20.1, no DFlash, no AEON/sm_121a optimizations) and are **provisional — to be refreshed** with a fresh fully-vanilla re-benchmark on the current version. The optimized figures are measured on the current `aeon-vllm-ultimate:latest` (vLLM 0.23.0) build. (The full stock sweep with provenance is preserved [below](#stock-community-vllm-baseline-no-dflash).)
+
+### Long-context tiers (current build)
+
+DFlash acceptance holds as context grows — the DFlash sliding-window-attention fix (PR #40898) keeps the drafter useful well past 2k tokens. Single-stream (c=1), measured `prompt_tokens_p50` as the context size:
+
+| Context | Category | Decode tok/s | TTFT p50 | Prefill (PP) | DFlash accept |
+|---|---|---:|---:|---:|---:|
+| ~16k | Coding | 128.2 | 3.8 s | 4,270 tok/s | 58.7% |
+| ~16k | Reasoning | 102.8 | 5.2 s | 3,915 tok/s | 46.4% |
+| ~16k | Extraction / JSON | 169.8 | 5.2 s | 3,890 tok/s | 77.5% |
+| ~32k | Coding | 92.8 | 10.2 s | 3,188 tok/s | 46.7% |
+| ~32k | Reasoning | 83.0 | 14.1 s | 2,899 tok/s | 40.8% |
+| ~32k | Extraction / JSON | 156.3 | 14.1 s | 2,888 tok/s | 77.5% |
 
 ## Model Specs
 
@@ -227,11 +263,11 @@ The fix is adding tokens 98, 100, and 101 to the `eos_token_id` list in `generat
 
 ### What's In The Container (The Special Sauce)
 
-The current image is [`ghcr.io/aeon-7/aeon-vllm-ultimate:latest`](https://github.com/AEON-7/vllm-ultimate-dgx-spark) (= `:2026-06-11-pr41703`). Users pull one image; no local patching or source build is required.
+The current image is [`ghcr.io/aeon-7/aeon-vllm-ultimate:latest`](https://github.com/AEON-7/vllm-ultimate-dgx-spark) (= `:2026-06-18-v0.23.0-dflashfix`). Users pull one image; no local patching or source build is required.
 
 | Component | What It Is | Why It Matters |
 |---|---|---|
-| **vLLM 0.22.1-lineage + PR #44389** | main@2026-06-05 + Triton NVFP4 KV cache cherry-pick | Up to 3× KV capacity opt-in (`--kv-cache-dtype nvfp4`; causal speculators only). |
+| **vLLM 0.23.0 (sm_121a from-source) + PR #44389** | v0.23.0 built for GB10 + Triton NVFP4 KV cache | Up to 3× KV capacity opt-in (`--kv-cache-dtype nvfp4`; causal speculators only). |
 | **PR #40898 + #41703 overlay** | DFlash drafter fixes merged ahead of upstream | Rejected-slot KV-write masking (no more acceptance collapse under prefix caching), drafter sliding-window support, Gemma-4 embed normalizer + logit softcap, `flash_attn` drafter on multimodal Gemma targets. |
 | **AEON sm_121a patches** | 3 idempotent runtime patches | GB10 correctness (optional-import lazy binding, hybrid block-size None guards, CUDA-graph capture-size alignment for spec decode). |
 | **PyTorch 2.11.0 + CUDA 13** | Framework + runtime | SM 12.1 (GB10) support. |
@@ -269,22 +305,44 @@ We achieve **~37–158 tok/s single-stream** depending on category — coding su
 
 This is why architecture choice matters more than raw parameter count on bandwidth-limited hardware. A 26B MoE model at NVFP4 is faster than a dense 7B at BF16 on the same hardware.
 
+## What we fixed for the DGX Spark
+
+All AEON models run on one unified container — **`ghcr.io/aeon-7/aeon-vllm-ultimate:latest`** (= `:2026-06-18-v0.23.0-dflashfix`; rollback `:2026-06-11-pr41703`) — vLLM v0.23.0 built from source for GB10 / sm_121a and merged with the AEON speculative-decoding stack.
+
+| Fix | What it does | Why it matters on GB10 |
+|---|---|---|
+| **DFlash high-concurrency fix** *(new)* | Slices the speculative drafter's KV block-table to the unpadded batch (`block_table[:num_reqs]`) | The drafter previously **crashed at ≥32 concurrent requests** (padded-vs-unpadded block-table shape mismatch in FlashAttention). Now scales cleanly to **c=64**. A port of upstream PR #43982 (fixed for MTP, never applied to DFlash) — present and unfixed even in the prior image. |
+| **Triton NVFP4 KV cache** (PR #44389) | Software NVFP4 KV-cache path | The only 4-bit KV path on sm_121a (upstream's is hard-gated to B200) → ~3× KV capacity / longer context per GB of unified memory. |
+| **DFlash sliding-window attention** (PR #40898) | Runs the drafter's SWA layers as true sliding-window | Long-context draft acceptance holds as agent histories grow (≈47% at ~16k, ~41% at ~32k for this model) instead of collapsing past ~2k tokens. |
+| **sm_121a-native build** | `TORCH_CUDA_ARCH_LIST=12.1a`, `ENABLE_NVFP4_SM100=0` | Compiles the SM120-family CUTLASS NVFP4/FP8 kernels GB10 actually dispatches to — true 4-bit tensor-core throughput, no dead B200-only kernels. |
+| **sm_121a boot + CUDA-graph patches** | RTLD-lazy `_C_stable_libtorch` load; spec-decode CUDA-graph capture-size alignment | Boots past MXFP4 (SM100-only) symbols absent on GB10; prevents `cudaErrorIllegalAddress` on partial-acceptance decode steps under speculative decoding. |
+| **Unified-memory tuning** | `--gpu-memory-utilization ≤0.80`, FULL CUDA graphs, async scheduling, z-lab DFlash drafter | GB10 shares one LPDDR5X pool across CPU + GPU; conservative KV headroom avoids page-thrash while keeping FULL-graph + speculative-decode throughput. |
+
+**The result for this model:**
+
+- **Scales to 64 concurrent requests** with no crash (the prior image crashed at c≥32 under speculative decoding) — up to **1,937 tok/s aggregate** at c=64 on coding.
+- **Native NVFP4 4-bit compute** on Blackwell tensor cores — the speed of 4-bit with near-16-bit accuracy.
+- **Speculative decoding (DFlash)** holds high draft acceptance from short prompts (58.9% coding / 77.5% extraction at c=1) through long agent histories (~47% at 16k, ~41% at 32k).
+- **Up to 4.3× faster single-stream decode** (≈2.5× average across categories) vs. the stock un-optimized vanilla vLLM baseline.
+
+> **About the stock baseline:** the "stock / un-optimized" comparison numbers are from stock vanilla vLLM (`vllm/vllm-openai` 0.20.1, default settings, no speculative decoding, no DGX-Spark / sm_121a optimizations). They are **provisional and will be refreshed** once a fresh fully-vanilla benchmark completes on the current version. The optimized figures are measured on the new `aeon-vllm-ultimate:latest` (vLLM 0.23.0) build.
+
 ## Container Image Details
 
 ### AEON vLLM Ultimate (recommended)
 
-**`ghcr.io/aeon-7/aeon-vllm-ultimate:latest`** (= `:2026-06-11-pr41703`) — [repo + full card](https://github.com/AEON-7/vllm-ultimate-dgx-spark)
+**`ghcr.io/aeon-7/aeon-vllm-ultimate:latest`** (= `:2026-06-18-v0.23.0-dflashfix`) — [repo + full card](https://github.com/AEON-7/vllm-ultimate-dgx-spark)
 
 | Component | Version |
 |---|---|
-| vLLM | 0.22.1-lineage (main@2026-06-05) + PR #44389 NVFP4-KV + **PR #40898/#41703 DFlash fixes** |
+| vLLM | 0.23.0 sm_121a from-source + PR #44389 NVFP4-KV + **PR #40898/#41703 DFlash fixes** + **DFlash high-concurrency fix** (PR #43982 ported to DFlash) |
 | PyTorch | 2.11.0+cu130 |
 | transformers | 5.10.0.dev (HEAD) |
-| flashinfer | 0.6.8.post1 |
+| flashinfer | 0.6.12 |
 | DFlash drafter | mount `z-lab/gemma-4-26B-A4B-it-DFlash`, drafter backend `flash_attn` |
 | Target GPU | NVIDIA GB10 (DGX Spark, sm_121a); also RTX 50-series (sm_120) |
 
-Pinned tags: `:2026-06-11-pr41703` (current `:latest`), `:2026-06-04-pr44389` (pre-fix rollback — flex drafter only, prefix caching NOT safe with DFlash). The older `aeon-gemma-4-26b-a4b-dflash:v2` (vLLM 0.20.1) lineage is superseded and kept only for historical comparison.
+Pinned tags: `:2026-06-18-v0.23.0-dflashfix` (current `:latest`), `:2026-06-11-pr41703` (rollback — vLLM 0.22.1-lineage, DFlash crashes at c≥32). The older `:2026-06-04-pr44389` (pre-fix, flex drafter only, prefix caching NOT safe with DFlash) and the `aeon-gemma-4-26b-a4b-dflash:v2` (vLLM 0.20.1) lineage are superseded and kept only for historical comparison.
 
 ### Stock Community Baseline Image
 
